@@ -453,12 +453,8 @@ export async function insertImageBlob(file: Blob, at?: [number, number]) {
 /** Ask for an image file (Tauri dialog, or a file input in a browser). */
 export async function pickImage(): Promise<{ path?: string; file?: File } | null> {
   if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const p = await open({
-      title: "Insert image",
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "svg", "webp"] }],
-    });
-    return typeof p === "string" ? { path: p } : null;
+    const p = await api.pick("image");
+    return p ? { path: p } : null;
   }
   return new Promise((resolve) => {
     const input = document.createElement("input");

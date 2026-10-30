@@ -61,6 +61,7 @@ import {
   nb,
   newNote,
   newSection,
+  recentNotebooks,
   sidebarShown,
   toggleSidebar,
 } from "./notebook";
@@ -840,7 +841,9 @@ export function App() {
       });
     }
     void applyTheme();
-    syncRecent();
+    // before anything is opened: the desktop app adopts older recent lists only until then
+    const lastBook = lastNotebook();
+    await syncRecent(lastBook ? [lastBook, ...recentNotebooks().filter((p) => p !== lastBook)] : recentNotebooks());
     await onMenu(runCommand);
     await guardClose(() => state.dirty && !nb.current, api.clearRecovery, flushSave);
     installAutosave();
