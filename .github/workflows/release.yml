@@ -1,7 +1,11 @@
 # Builds installers for Windows, Linux and macOS, plus signed update packages and
 # latest.json for the in-app updater, and attaches them to a draft release.
 # Run it by pushing a version tag (git tag v0.1.0 && git push origin v0.1.0) or from the
-# Actions tab ("Run workflow").
+# Actions tab ("Run workflow", on main only).
+#
+# Nothing is built until `check` has seen that the tag matches the version in Cargo.toml,
+# app/package.json and tauri.conf.json, that the commit is on main, and that CI passed on it.
+# The build job holds the updater's signing key, so every action it uses is pinned by commit.
 name: Release
 
 on:
@@ -10,10 +14,71 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  check:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Run from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Release runs from main, not ${GITHUB_REF}"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: The tag matches the version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cargo_v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          npm_v=$(node -p "require('./app/package.json').version")
+          tauri_v=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          echo "Cargo.toml: $cargo_v, app/package.json: $npm_v, tauri.conf.json: $tauri_v"
+          if [ -z "$cargo_v" ] || [ "$cargo_v" != "$npm_v" ] || [ "$cargo_v" != "$tauri_v" ]; then
+            echo "::error::The three version numbers differ; see docs/06-releasing.md"
+            exit 1
+          fi
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$cargo_v" ]; then
+            echo "::error::Tag $REF_NAME doesn't match version $cargo_v"
+            exit 1
+          fi
+      - name: The commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main"
+            exit 1
+          fi
+      # CI starts on the same push as the tag, so it may still be running: wait for it
+      - name: CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 1 120); do
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+              --event push --limit 1 --json status,conclusion --jq '.[0] // {} | "\(.status) \(.conclusion)"')
+            echo "CI on $GITHUB_SHA: ${run:-not started}"
+            case "$run" in
+              "completed success") exit 0 ;;
+              completed*)
+                echo "::error::CI did not pass on $GITHUB_SHA"
+                exit 1
+                ;;
+            esac
+            sleep 30
+          done
+          echo "::error::CI did not finish within an hour"
+          exit 1
+
   build:
+    needs: check
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +91,7 @@ jobs:
             args: "--target universal-apple-darwin"
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -34,23 +99,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
 
-      - uses: swatinem/rust-cache@v2
+      - name: Both macOS architectures
+        if: matrix.platform == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # the build below can't take --locked, so make sure Cargo.lock needs no change first
+      - name: Cargo.lock is up to date
+        run: cargo fetch --locked
 
       - name: Install front-end dependencies
         run: npm ci
         working-directory: app
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # signs the update packages; the app checks them against the public key in tauri.conf.json
