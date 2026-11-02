@@ -30,7 +30,7 @@ Everything Quire does today, by area. The [README](../README.md) has the short v
 - Click a selected box again (or double-click it) to edit with the caret where you clicked. With a text box selected but not being edited, the ribbon formats the whole box.
 
 ## Layout
-- Drag to move (9 px grid, **smart guides** to other regions' edges and centres; hold ⌘ for free movement), drag handles to resize text width or images.
+- Drag to move (9 px grid, **smart guides** to other regions' edges and centres; hold ⌘ for free movement), drag handles to resize text width, images or plots; ⌘ + arrows resize the selected image or plot.
 - Select several (Shift-click or drag a frame) and **align** left/centre/right/top/middle/bottom or **distribute** them — format bar, Arrange menu or right-click.
 - Copy, cut, paste and duplicate regions (⌘C/⌘X/⌘V/⌘D); paste or drop images straight onto the page.
 - **Copy and paste work across windows and documents**, and still work after Quire restarts. Images come along too.

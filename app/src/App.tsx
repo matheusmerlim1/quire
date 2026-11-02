@@ -125,12 +125,30 @@ function fileName(path: string | null): string {
 // Live evaluation: every document change re-runs the worksheet (≈0.3 ms in Rust).
 // ---------------------------------------------------------------------------
 
+/** Waiting for a report of the document as it is now (see `afterEvaluation`). */
+let waiting: (() => void)[] = [];
+
 const liveReport = latestOnly(
   () => api.report(unwrap(state.doc)),
-  showReport,
-  (e) => flash(String(e)),
+  (report) => {
+    showReport(report);
+    // only the newest request's answer arrives here: the results are now current
+    const run = waiting;
+    waiting = [];
+    for (const fn of run) fn();
+  },
+  (e) => {
+    waiting = [];
+    flash(String(e));
+  },
   30,
 );
+
+/** Run `fn` once the results on screen are those of the document as it is now. */
+function afterEvaluation(fn: () => void) {
+  if (liveReport.pending()) waiting.push(fn);
+  else fn();
+}
 
 // whatever an edit held back shows as soon as it ends
 createRoot(() => createEffect(on(() => state.editing, releaseErrors, { defer: true })));
@@ -708,26 +726,31 @@ function speakChanges() {
       (m) => m && announce(m),
     ),
   );
-  // the error of the region just edited, once the edit ends and evaluation catches up
-  let edited: string | null = null;
+  // the region just edited, once the edit ends and evaluation catches up: its error, or
+  // for math its result (the line is hidden while it is edited, so it was never heard)
+  let edits = 0;
+  let resultDue: string | null = null;
   createEffect(
     on(
       () => state.editing,
       (now, before) => {
-        if (before && !now) edited = before;
+        if (!before || now) return;
+        const id = before;
+        const edit = ++edits;
+        resultDue = layout().byId.get(id)?.region.kind === "math" ? id : null;
+        // after the rest of the edit's ending (Esc selecting the region, a typed unit applied)
+        queueMicrotask(() =>
+          afterEvaluation(() => {
+            // typing again, or a later edit ended: that one speaks instead
+            if (edit !== edits || state.editing) return;
+            const due = resultDue === id;
+            resultDue = null;
+            const error = state.views[id]?.error;
+            if (error) announce(`Error: ${error}`, true);
+            else if (due && layout().byId.has(id)) announce(describeRegion(id));
+          }),
+        );
       },
-    ),
-  );
-  createEffect(
-    on(
-      () => state.report,
-      () => {
-        if (!edited || state.editing) return;
-        const error = state.views[edited]?.error;
-        edited = null;
-        if (error) announce(`Error: ${error}`, true);
-      },
-      { defer: true },
     ),
   );
   createEffect(
@@ -736,6 +759,11 @@ function speakChanges() {
       () => {
         if (!fromKeyboard() || state.editing) return;
         const n = state.selection.length;
+        if (!n) return;
+        // Esc leaves the region just edited selected: it is described once its result is in
+        if (n === 1 && state.selection[0] === resultDue) return;
+        // moved on before it was: the region now selected is what matters (an error still speaks)
+        resultDue = null;
         if (n === 1) announce(describeRegion(state.selection[0]));
         else if (n > 1) announce(`${n} regions selected`);
       },

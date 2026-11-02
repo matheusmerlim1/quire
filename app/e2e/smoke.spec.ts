@@ -123,6 +123,26 @@ test("undo and redo a new region", async ({ page }) => {
   await expect(regions(page).nth(1)).toContainText(/=6$/);
 });
 
+test("clicking a resize handle without dragging changes nothing, and keeps Redo", async ({ page }) => {
+  await blank(page);
+  await page.keyboard.press("ControlOrMeta+Alt+p");
+  const plot = page.locator(".region.plot2d");
+  await expect(plot).toHaveClass(/\bselected\b/);
+  const left = async () => (await plot.boundingBox())!.x;
+  const at = await left();
+  // a step to undo and redo
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(left).toBeGreaterThan(at);
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(left).toBe(at);
+  const box = (await plot.locator(".resize-handle").boundingBox())!;
+  const size = (await plot.boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  expect((await plot.boundingBox())!.width).toBe(size.width);
+  await page.keyboard.press("ControlOrMeta+Shift+z");
+  await expect.poll(left).toBeGreaterThan(at);
+});
+
 test("a change upstream updates results below", async ({ page }) => {
   await blank(page);
   await typeLines(page, "L:=2 m", "A:=L*3=");

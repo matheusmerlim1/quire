@@ -98,6 +98,7 @@ const KEYS: Row[] = [
   [`${alt}${mod}I`, "inspector"],
   [`${mod}E`, "export as PDF"],
   ["Arrows, ⇧Arrows", "move the selection or the red cross"],
+  [`${mod}Arrows, ${shift}${mod}Arrows`, "resize the selected image or plot"],
   ["Space + drag", "pan; pinch or " + `${mod}scroll to zoom`],
   [`Hold ${mod} while dragging`, "move freely, without guides"],
 ];
