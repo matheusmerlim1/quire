@@ -114,4 +114,34 @@ impl Expr {
     pub fn is_quantity(&self) -> bool {
         matches!(self, Expr::Binary(BinaryOp::Juxt, ..))
     }
+
+    /// Levels of nesting, a leaf being 1. Worked out without recursion, so it is safe on a
+    /// tree of any depth: callers that build trees check it against [`crate::MAX_DEPTH`].
+    pub fn depth(&self) -> usize {
+        let mut deepest = 0;
+        let mut stack: Vec<(&Expr, usize)> = vec![(self, 1)];
+        while let Some((e, d)) = stack.pop() {
+            deepest = deepest.max(d);
+            let mut push = |x| stack.push((x, d + 1));
+            match e {
+                Expr::Num(_) | Expr::Ident(_) | Expr::Unit(_) | Expr::Str(_) | Expr::Placeholder => {}
+                Expr::Paren(x) | Expr::Unary(_, x) | Expr::Factorial(x) => push(x),
+                Expr::Binary(_, a, b) | Expr::Range(a, b) | Expr::Define { lhs: a, rhs: b, .. } => {
+                    push(a);
+                    push(b);
+                }
+                Expr::Compare(a, rest) => {
+                    push(a);
+                    rest.iter().for_each(|(_, x)| push(x));
+                }
+                Expr::Call(_, xs) => xs.iter().for_each(push),
+                Expr::Index(b, xs) => {
+                    push(b);
+                    xs.iter().for_each(push);
+                }
+                Expr::Matrix(rows) => rows.iter().flatten().for_each(push),
+            }
+        }
+        deepest
+    }
 }

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use jotdown::{Container, Event};
+use jotdown::{AttributeKind, Attributes, Container, Event};
 
 /// Earlier versions wrote text colours unquoted (`[x]{color=#c00}`), which Djot does not
 /// accept as an attribute value; quote them so those documents keep their colours.
@@ -40,6 +40,20 @@ fn quote_colors_at<'a>(src: &'a str, added: &mut Vec<usize>) -> Cow<'a, str> {
     }
     out.push_str(rest);
     Cow::Owned(out)
+}
+
+/// Djot copies any `{key=value}` onto the element, so a document could add `style`, `id` or an
+/// event handler. Only what the editor and the SMath importer write is kept: classes (`.center`,
+/// `.underline`) and the `color`, `size` and `font` that `applyDjotAttributes` turns into styles.
+fn safe_attrs(attrs: Attributes<'_>) -> Attributes<'_> {
+    attrs
+        .into_iter()
+        .filter(|(k, _)| match k {
+            AttributeKind::Class => true,
+            AttributeKind::Pair { key } => matches!(key.as_ref(), "color" | "size" | "font"),
+            AttributeKind::Id | AttributeKind::Comment => false,
+        })
+        .collect()
 }
 
 fn safe_link(url: &str) -> bool {
@@ -291,7 +305,9 @@ fn render(src: &str, math_prefix: Option<&str>) -> String {
     }
 }
 
-/// Makes untrusted events safe to render: raw HTML is dropped and unsafe links lead nowhere.
+/// Makes untrusted events safe to render: raw HTML is dropped, unsafe links lead nowhere and
+/// only formatting attributes survive ([`safe_attrs`]). The editor's `data-djot` source keeps
+/// a block's attributes as written, so filtering what is rendered loses nothing on save.
 /// With `math`, inline math becomes numbered sentinels that [`replace_sentinels`] swaps for
 /// placeholders.
 struct Neutralize {
@@ -330,14 +346,17 @@ impl Neutralize {
             }
             Event::Str(_) if self.in_math => return None,
             Event::Start(Container::Link(url, ty), attrs) if !safe_link(url) => {
-                return Some(Event::Start(Container::Link("#".into(), *ty), attrs.clone()));
+                return Some(Event::Start(Container::Link("#".into(), *ty), safe_attrs(attrs.clone())));
             }
             Event::End(Container::Link(url, ty)) if !safe_link(url) => {
                 return Some(Event::End(Container::Link("#".into(), *ty)));
             }
             _ => {}
         }
-        Some(e)
+        Some(match e {
+            Event::Start(c, attrs) => Event::Start(c, safe_attrs(attrs)),
+            e => e,
+        })
     }
 }
 
@@ -463,5 +482,25 @@ mod tests {
         let l = render_djot("[x](javascript:alert(1))");
         assert!(!l.contains("javascript"), "{l}");
         assert!(render_djot("<b>hi</b>").contains("&lt;b&gt;"));
+    }
+
+    #[test]
+    fn only_formatting_attributes_reach_the_html() {
+        let src = "[x]{onmouseover=\"alert(1)\" style=\"position:fixed\" #login .u color=\"#c00\"}\n\n\
+                   {onclick=\"alert(1)\" .center size=12 font=\"Arial\"}\npara\n\n\
+                   [y](javascript:void0){onfocus=\"alert(1)\" .page}\n";
+        let h = render_djot(src);
+        assert!(h.contains(r##"<span class="u" color="#c00">x</span>"##), "{h}");
+        assert!(h.contains(r#"<p class="center" size="12" font="Arial">para</p>"#), "{h}");
+        assert!(h.contains(r##"<a href="#" class="page">y</a>"##), "{h}");
+        // the editor's render too; its data-djot source keeps them, escaped, for saving
+        let editable = super::render_djot_editable(src);
+        for html in [&h, &editable] {
+            for bad in ["onmouseover=\"", "style=\"", "id=\"login\"", "onclick=\"", "onfocus=\""] {
+                assert!(!html.contains(bad), "{bad} in {html}");
+            }
+        }
+        assert!(editable.contains(r##"<span class="u" color="#c00">x</span>"##), "{editable}");
+        assert_eq!(sources(&editable).concat(), src, "the source survives untouched");
     }
 }

@@ -76,6 +76,16 @@ pub(crate) fn staged(src: &str) -> Option<Vec<u8>> {
     staging().get(src).cloned()
 }
 
+/// Whether `src` is an image added since the document was opened (it has no bundle yet).
+pub fn is_staged(src: &str) -> bool {
+    staging().contains_key(src)
+}
+
+/// Whether a file on disk is an image a document can hold, by its extension.
+pub fn is_image(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| mime(&format!("x.{e}")).is_some())
+}
+
 /// Every asset path the document references (images, page backgrounds, legacy blobs).
 pub(crate) fn referenced(doc: &Json) -> BTreeSet<String> {
     fn walk(v: &Json, out: &mut BTreeSet<String>) {
@@ -116,4 +126,25 @@ pub(crate) fn write_into(dir: &Path, doc: &Json, from: Option<&Path>) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_are_known_by_their_extension() {
+        assert!(is_image(Path::new("/photos/Beam.JPG")));
+        assert!(is_image(Path::new("diagram.svg")));
+        assert!(!is_image(Path::new("/home/me/.ssh/id_ed25519")));
+        assert!(!is_image(Path::new("notes.png.txt")));
+    }
+
+    #[test]
+    fn only_staged_images_count_as_staged() -> Result<()> {
+        let src = stage(b"\x89PNG\r\n\x1a\nstaged-check".to_vec(), "png")?;
+        assert!(is_staged(&src));
+        assert!(!is_staged("assets/0000000000000000.png"));
+        Ok(())
+    }
 }

@@ -2,7 +2,9 @@ import { createEffect, createMemo, createSignal, For, Index, on, onCleanup, onMo
 import { openRegionMenu, openRegionMenuAt } from "./menu";
 import { SHEET_GAP } from "./pages";
 import { forwardTyping } from "./MathEditor";
-import { RegionBox } from "./Region";
+import { RegionBox, resizable, resizeBy } from "./Region";
+import { announce } from "./a11y";
+import { isMac } from "./api";
 import { nearestRegion, stepRegion } from "./nav";
 import { editPlot } from "./Plot";
 import { Sheet } from "./Sheet";
@@ -331,6 +333,14 @@ export function Canvas() {
     window.addEventListener("pointerup", up);
   }
 
+  // where Tab goes on from when nothing is selected: the region last selected or edited, so
+  // Tab after Enter leaves a region moves to the next one rather than to the document's first
+  let tabFrom: string | null = null;
+  createEffect(() => {
+    const at = state.editing ?? state.selection[state.selection.length - 1];
+    if (at) tabFrom = at;
+  });
+
   function onBackgroundDown(e: PointerEvent) {
     if (e.button === 1 || spaceDown) {
       e.preventDefault();
@@ -353,6 +363,8 @@ export function Canvas() {
       if (!dragging || !box) {
         const [x, y] = layout().fromScene(...toScene(ev.clientX, ev.clientY));
         setState({ caret: [Math.max(0, snap(x)), Math.max(0, snap(y))], selection: [] });
+        // a click on the page starts Tab afresh, from the top
+        tabFrom = null;
         return;
       }
       const [l, r] = [Math.min(box.x0, box.x1), Math.max(box.x0, box.x1)];
@@ -455,7 +467,7 @@ export function Canvas() {
     // Tab / ⇧Tab: the next region in reading order; ⌥ + arrow: the nearest one that way
     if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
-      const next = stepRegion(sel.length ? sel[sel.length - 1] : null, e.shiftKey ? -1 : 1);
+      const next = stepRegion(sel.length ? sel[sel.length - 1] : tabFrom, e.shiftKey ? -1 : 1);
       if (next) selectInView(next);
       return;
     }
@@ -479,6 +491,8 @@ export function Canvas() {
     }
     if (e.key === "Escape") {
       setState({ selection: [], caret: null });
+      // leaving the page's selection: Tab starts again from the top
+      tabFrom = null;
       return;
     }
     // the context menu from the keyboard: for the selection, or the empty page at the insertion point
@@ -509,6 +523,15 @@ export function Canvas() {
       ArrowUp: [0, -1],
       ArrowDown: [0, 1],
     };
+    // ⌘ + arrows resize the selected image or plot: → and ↓ grow it, ← and ↑ shrink it
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    if (arrows[e.key] && mod && sel.length === 1 && resizable(layout().byId.get(sel[0])?.region)) {
+      e.preventDefault();
+      const step = GRID * (e.shiftKey ? 5 : 1);
+      const size = resizeBy(sel[0], arrows[e.key][0] * step, arrows[e.key][1] * step);
+      if (size) announce(`${size[0]} by ${size[1]}`);
+      return;
+    }
     if (arrows[e.key]) {
       e.preventDefault();
       if (e.key === "ArrowUp" && !sel.length && !e.shiftKey && returnToLeftBox()) return;

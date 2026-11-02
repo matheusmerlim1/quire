@@ -3,9 +3,9 @@
 //! SMath (`slope(vx, vy)`, `cspline(vx, vy)` with `interp(vs, vx, vy, x)`, `Var` for the
 //! sample variance next to `var` for the population one).
 
-use quire_units::{Dim, Rational};
+use quire_units::Dim;
 
-use crate::builtins::{arg, arity, column, flatten, nth_value, slot};
+use crate::builtins::{arg, arity, column, dim_div, dim_pow, flatten, nth_value, slot};
 use crate::error::{Result, bail, internal};
 use crate::format::describe_dim;
 use crate::numeric;
@@ -81,11 +81,7 @@ fn spread(name: &str, args: &[Value], sample: bool, root: bool) -> Result<Value>
     let mean = v.iter().sum::<f64>() / n;
     let ss: f64 = v.iter().map(|x| (x - mean).powi(2)).sum();
     let var = ss / if sample { n - 1.0 } else { n };
-    Ok(Value::Num(if root {
-        Quantity::new(var.sqrt(), dim)
-    } else {
-        Quantity::new(var, dim.pow(Rational::int(2)))
-    }))
+    Ok(Value::Num(if root { Quantity::new(var.sqrt(), dim) } else { Quantity::new(var, dim_pow(dim, 2)?) }))
 }
 
 /// `percentile(v, p)` with p from 0 to 1, interpolating between ranks (Excel's PERCENTILE.INC).
@@ -166,7 +162,7 @@ fn slope(args: &[Value]) -> Result<(Quantity, Quantity)> {
     }
     let m = sxy / sxx;
     let b = mean(&y) - m * mean(&x);
-    Ok((Quantity::new(b, yd), Quantity::new(m, yd / xd)))
+    Ok((Quantity::new(b, yd), Quantity::new(m, dim_div(yd, xd)?)))
 }
 
 /// Pearson's correlation coefficient.
@@ -195,14 +191,17 @@ fn polyfit(args: &[Value]) -> Result<Value> {
         bail!("polyfit needs x values other than zero");
     }
     let a: Vec<f64> = x.iter().flat_map(|v| (0..=k).map(move |j| (v / s).powi(j as i32))).collect();
+    crate::budget::charge(crate::budget::least_squares_work(x.len(), k + 1), 64)?;
     let Some(c) = numeric::least_squares(a, y, k + 1) else {
         bail!("polyfit needs at least {} different x values for degree {k}", k + 1)
     };
     let data = c
         .iter()
         .enumerate()
-        .map(|(j, c)| Value::Num(Quantity::new(c / s.powi(j as i32), yd / xd.pow(Rational::int(j as i32)))))
-        .collect();
+        .map(|(j, c)| {
+            Ok(Value::Num(Quantity::new(c / s.powi(j as i32), dim_div(yd, dim_pow(xd, j as i32)?)?)))
+        })
+        .collect::<Result<_>>()?;
     Ok(Value::Matrix(Matrix::column(data)))
 }
 
@@ -231,7 +230,7 @@ fn spline(name: &str, args: &[Value], ends: Ends) -> Result<Value> {
     arity(name, args, |n| n == 2, "2 arguments: (vx, vy)")?;
     let ((x, xd), (y, yd)) = knots(name, arg(args, 0)?, arg(args, 1)?)?;
     let m = second_derivatives(&x, &y, ends)?;
-    Ok(column(m, yd / xd.pow(Rational::int(2))))
+    Ok(column(m, dim_div(yd, dim_pow(xd, 2)?)?))
 }
 
 /// The second derivatives M at the knots, for the spline with the given ends. The knots
@@ -308,7 +307,7 @@ fn interp(args: &[Value]) -> Result<Value> {
     arity("interp", args, |n| n == 4, "4 arguments: interp(vs, vx, vy, x) with vs := cspline(vx, vy)")?;
     let ((x, xd), (y, yd)) = knots("interp", arg(args, 1)?, arg(args, 2)?)?;
     let (m, md) = data("interp", "vs", arg(args, 0)?)?;
-    if m.len() != x.len() || (md != yd / xd.pow(Rational::int(2)) && m.iter().any(|v| *v != 0.0)) {
+    if m.len() != x.len() || (md != dim_div(yd, dim_pow(xd, 2)?)? && m.iter().any(|v| *v != 0.0)) {
         bail!(
             "interp's first argument must come from cspline(vx, vy) (or pspline, lspline) for the same data"
         );

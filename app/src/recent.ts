@@ -13,13 +13,21 @@ export function recentList(): string[] {
   }
 }
 
-function store(list: string[]) {
+function write(list: string[]) {
   try {
     localStorage.setItem(KEY, JSON.stringify(list));
   } catch {
     // blocked storage: the menu still updates for this session
   }
-  void api.setRecent(list).catch(() => {});
+}
+
+/** The desktop app keeps only documents the user chose; the list follows, so the menu's items match it. */
+function store(list: string[]): Promise<void> {
+  write(list);
+  return api
+    .setRecent(list)
+    .then(write)
+    .catch(() => {});
 }
 
 export function addRecent(path: string) {
@@ -34,7 +42,11 @@ export function clearRecent() {
   store([]);
 }
 
-/** Fill the menu at startup. */
-export function syncRecent() {
-  void api.setRecent(recentList()).catch(() => {});
+/**
+ * Fill the menu at startup. Versions up to 0.2.1 kept the recent lists only here; the desktop
+ * app takes them over once, before any document is open, so they keep working.
+ */
+export async function syncRecent(notebooks: string[]) {
+  await api.adoptRecent(recentList(), notebooks).catch(() => {});
+  await store(recentList());
 }

@@ -229,6 +229,11 @@ fn rename(name: &str) -> &str {
         "arcsec" => "asec",
         "arccosec" => "acsc",
         "cosec" => "csc",
+        "arsh" => "asinh",
+        "arch" => "acosh",
+        "arth" => "atanh",
+        "arcth" => "acoth",
+        "cosech" => "csch",
         "lg" => "log10",
         "nthroot" => "root",
         _ => name,
@@ -589,6 +594,12 @@ mod tests {
     fn function_rename() -> std::result::Result<(), Box<dyn std::error::Error>> {
         assert_eq!(render(&[operand("x"), func("tg", 1)])?, "tan(x)");
         assert_eq!(render(&[operand("x"), func("lg", 1)])?, "log10(x)");
+        // SMath's hyperbolic inverses and cosecant, as the European names it stores
+        assert_eq!(render(&[operand("x"), func("arsh", 1)])?, "asinh(x)");
+        assert_eq!(render(&[operand("x"), func("arch", 1)])?, "acosh(x)");
+        assert_eq!(render(&[operand("x"), func("arth", 1)])?, "atanh(x)");
+        assert_eq!(render(&[operand("x"), func("arcth", 1)])?, "acoth(x)");
+        assert_eq!(render(&[operand("x"), func("cosech", 1)])?, "csch(x)");
         Ok(())
     }
 

@@ -5,6 +5,7 @@
 //! - [`Worksheet`]: SMath/Mathcad document semantics — regions run in reading order,
 //!   a definition is visible below it, `≡` global definitions are visible everywhere.
 
+mod budget;
 mod builtins;
 mod constants;
 mod error;
@@ -16,6 +17,7 @@ mod ops;
 mod plot;
 mod sheet;
 mod solvers;
+mod special;
 mod stats;
 mod symbolic;
 mod value;

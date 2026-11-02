@@ -193,7 +193,7 @@ The report tells the editor how each name was resolved, and which variables hide
 
 SMath unit names that mean something else in Quire are rewritten by the importer: `'h` (SMath's Planck constant) as `'ℎ`, `'cal`/`'kcal` (International Table) as `'cal.IT`/`'kcal.IT`, `'yr` (Gregorian) as `'yr.Gregorian`, `'rpm` (2π rad a minute; Quire's `'rpm` counts cycles) as `'rev/'min`, and SMath's `'`/`"` of arc as `'arcmin`/`'arcsec`. Not supported, so an "unknown unit" error: the information units (`'bit`, `'B` and multiples), `'dB`, `'¤`, `'hildebrand` (a fractional dimension), and `'R` (SMath's value, 0.01 C/kg, is not the roentgen's).
 
-Canonical function names are English (`tan`, `sinh`, `atan`, `log10`). The importer maps SMath's `tg`, `sh`, `arctg`, `nthroot` and so on.
+Canonical function names are English (`tan`, `sinh`, `atan`, `log10`). The importer maps SMath's `tg`, `sh`, `arctg`, `arsh`, `arcth`, `cosech`, `nthroot` and so on.
 
 ### 4.4 `text` (Djot)
 

@@ -4,17 +4,142 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod pdf;
 mod print;
+mod scope;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use scope::{Remembered, Scope};
+use serde::Deserialize;
 use serde_json::{Value as Json, json};
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder, Wry};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, Wry};
+use tauri_plugin_dialog::DialogExt;
 
 type CmdResult<T> = Result<T, String>;
 
 fn err(e: quire_service::ServiceError) -> String {
     e.0
+}
+
+// ---------------------------------------------------------------------------
+// The files the user chose (scope.rs): every path from the webview is checked against them
+// ---------------------------------------------------------------------------
+
+type Chosen = Mutex<Scope>;
+
+/// The scope. A poisoned lock still holds a valid scope, so it is used as it is.
+fn lock(chosen: &Chosen) -> MutexGuard<'_, Scope> {
+    chosen.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Refuse a path the user didn't choose. Any check also ends the window in which the recent
+/// lists of an earlier version may be adopted: from here on the webview may hold a document.
+fn allowed(chosen: &Chosen, path: &Path) -> CmdResult<()> {
+    let mut scope = lock(chosen);
+    scope.seal();
+    scope.check(path)
+}
+
+/// Where the recent documents and notebooks are kept between sessions.
+fn remembered_file(app: &AppHandle) -> CmdResult<PathBuf> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("recent.json"))
+}
+
+/// The saved lists: `None` when there are none yet. A damaged file counts as empty lists, so
+/// it never reopens the adoption of an earlier version's lists.
+fn load_remembered(app: &AppHandle) -> Option<Remembered> {
+    let text = std::fs::read_to_string(remembered_file(app).ok()?).ok()?;
+    Some(serde_json::from_str(&text).unwrap_or_default())
+}
+
+fn save_remembered(app: &AppHandle, remembered: &Remembered) -> CmdResult<()> {
+    let file = remembered_file(app)?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = file.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(remembered).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+}
+
+/// What a native dialog is for. The kind, not the webview, decides the filters, the extension
+/// a saved file gets and how much the choice grants (one file, or a whole notebook folder).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Pick {
+    Open,
+    Save,
+    Pdf,
+    Csv,
+    Image,
+    Notebook,
+    NewNotebook,
+}
+
+/// `.quire` packages on macOS, `.quirez` single files elsewhere (see `DOC_EXT` in api.ts).
+const DOC_EXT: &str = if cfg!(target_os = "macos") { "quire" } else { "quirez" };
+
+/// Run a native dialog and add what the user picked to the scope. `suggested` is the file name a
+/// save dialog starts with; only its last part is used.
+#[tauri::command]
+async fn pick(window: WebviewWindow, kind: Pick, suggested: Option<String>) -> CmdResult<Option<String>> {
+    let mut dialog = window.dialog().file();
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        dialog = dialog.set_parent(&window);
+    }
+    if let Some(name) = suggested.as_deref().and_then(|s| Path::new(s).file_name()) {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    let mac = cfg!(target_os = "macos");
+    let picked = match kind {
+        Pick::Open => dialog
+            .set_title("Open")
+            .add_filter("Quire document", if mac { &["quire", "quirez"] } else { &["quirez", "json"] })
+            .add_filter("SMath Studio worksheet", &["sm"])
+            .blocking_pick_file(),
+        Pick::Save if mac => dialog
+            .add_filter("Quire document", &["quire"])
+            .add_filter("Quire single file (for email and other systems)", &["quirez"])
+            .blocking_save_file(),
+        Pick::Save => dialog.add_filter("Quire document", &["quirez"]).blocking_save_file(),
+        Pick::Pdf => dialog.add_filter("PDF", &["pdf"]).blocking_save_file(),
+        Pick::Csv => dialog.add_filter("CSV", &["csv"]).blocking_save_file(),
+        Pick::Image => dialog
+            .set_title("Insert image")
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "svg", "webp"])
+            .blocking_pick_file(),
+        Pick::Notebook => dialog.set_title("Open Notebook").blocking_pick_folder(),
+        Pick::NewNotebook => dialog.set_title("New Notebook").blocking_save_file(),
+    };
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.simplified().into_path().map_err(|e| e.to_string())?;
+    let path = match kind {
+        Pick::Open => scope::document_path(path),
+        Pick::Save => scope::with_ext(path, &["quire", "quirez"], DOC_EXT),
+        Pick::Pdf => scope::with_ext(path, &["pdf"], "pdf"),
+        Pick::Csv => scope::with_ext(path, &["csv"], "csv"),
+        Pick::Image | Pick::Notebook | Pick::NewNotebook => path,
+    };
+    let remembered = {
+        let mut scope = lock(window.state::<Chosen>().inner());
+        match kind {
+            Pick::Notebook | Pick::NewNotebook => {
+                scope.grant_notebook(&path);
+                Some(scope.remembered().clone())
+            }
+            _ => {
+                scope.grant_file(&path);
+                None
+            }
+        }
+    };
+    if let Some(r) = remembered {
+        save_remembered(window.app_handle(), &r)?;
+    }
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -23,12 +148,24 @@ fn report(doc: Json) -> CmdResult<quire_service::Report> {
 }
 
 #[tauri::command]
-fn open_document(path: PathBuf) -> CmdResult<Json> {
+fn open_document(chosen: State<'_, Chosen>, path: PathBuf) -> CmdResult<Json> {
+    allowed(&chosen, &path)?;
     quire_service::open(&path).map_err(err)
 }
 
+/// `from` is the document's previous home, whose images a Save As copies: it is read, so it
+/// is checked as well.
 #[tauri::command]
-fn save_document(path: PathBuf, doc: Json, from: Option<PathBuf>) -> CmdResult<()> {
+fn save_document(
+    chosen: State<'_, Chosen>,
+    path: PathBuf,
+    doc: Json,
+    from: Option<PathBuf>,
+) -> CmdResult<()> {
+    allowed(&chosen, &path)?;
+    if let Some(from) = &from {
+        allowed(&chosen, from)?;
+    }
     quire_service::save(&path, &doc, from.as_deref()).map_err(err)
 }
 
@@ -39,8 +176,16 @@ fn recovery_file(app: &AppHandle) -> CmdResult<PathBuf> {
     Ok(dir.join("recovery.json"))
 }
 
+/// The recovered document's path is granted again in the next session, so only a path the
+/// user chose is kept; any other recovers as an untitled document.
 #[tauri::command]
-fn save_recovery(app: AppHandle, doc: Json, path: Option<String>) -> CmdResult<()> {
+fn save_recovery(
+    app: AppHandle,
+    chosen: State<'_, Chosen>,
+    doc: Json,
+    path: Option<String>,
+) -> CmdResult<()> {
+    let path = path.filter(|p| lock(&chosen).allows(Path::new(p)));
     let file = recovery_file(&app)?;
     let tmp = file.with_extension("json.tmp");
     let body = json!({ "path": path, "doc": doc });
@@ -50,10 +195,15 @@ fn save_recovery(app: AppHandle, doc: Json, path: Option<String>) -> CmdResult<(
 
 /// The unsaved work left by the last session, if it ended without saving or discarding.
 #[tauri::command]
-fn take_recovery(app: AppHandle) -> CmdResult<Option<Json>> {
+fn take_recovery(app: AppHandle, chosen: State<'_, Chosen>) -> CmdResult<Option<Json>> {
     let file = recovery_file(&app)?;
     let Ok(text) = std::fs::read_to_string(&file) else { return Ok(None) };
-    Ok(serde_json::from_str(&text).ok())
+    let recovered: Option<Json> = serde_json::from_str(&text).ok();
+    // `save_recovery` kept the path only if it was in scope then
+    if let Some(path) = recovered.as_ref().and_then(|r| r["path"].as_str()) {
+        lock(&chosen).grant_file(Path::new(path));
+    }
+    Ok(recovered)
 }
 
 #[tauri::command]
@@ -82,11 +232,15 @@ fn open_template(app: AppHandle, id: String) -> CmdResult<quire_service::templat
 #[tauri::command]
 fn save_template(
     app: AppHandle,
+    chosen: State<'_, Chosen>,
     name: String,
     description: String,
     doc: Json,
     from: Option<PathBuf>,
 ) -> CmdResult<String> {
+    if let Some(from) = &from {
+        allowed(&chosen, from)?;
+    }
     quire_service::templates::save_as(&templates_dir(&app)?, &name, &description, &doc, from.as_deref())
         .map_err(err)
 }
@@ -103,16 +257,33 @@ fn library() -> quire_service::Library {
 
 /// A table's Export as CSV…: only ever writes a `.csv` file the user picked.
 #[tauri::command]
-fn export_csv(path: PathBuf, contents: String) -> CmdResult<()> {
+fn export_csv(chosen: State<'_, Chosen>, path: PathBuf, contents: String) -> CmdResult<()> {
+    allowed(&chosen, &path)?;
     if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")) {
         return Err("a table can only be exported to a .csv file".into());
     }
     std::fs::write(&path, contents).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Notebooks: list, create, rename, move, trash and search notes in a folder.
+/// Notebooks: list, create, rename, move, trash and search notes in a folder, which must be a
+/// notebook the user chose. Opening one (`list`) moves it to the front of the recent notebooks.
 #[tauri::command]
-fn notebook(op: String, args: Json) -> CmdResult<Json> {
+fn notebook(app: AppHandle, chosen: State<'_, Chosen>, op: String, args: Json) -> CmdResult<Json> {
+    let folder = quire_service::notebook::folder(&op, &args).map_err(err)?;
+    let remembered = {
+        let mut scope = lock(&chosen);
+        scope.seal();
+        scope.check_notebook(&folder)?;
+        let before = scope.remembered().notebooks.first().cloned();
+        if op == "list" {
+            scope.grant_notebook(&folder);
+        }
+        let r = scope.remembered();
+        (r.notebooks.first() != before.as_ref()).then(|| r.clone())
+    };
+    if let Some(r) = remembered {
+        save_remembered(&app, &r)?;
+    }
     quire_service::notebook::call(&op, &args).map_err(err)
 }
 
@@ -122,7 +293,8 @@ fn djot_html(src: String) -> String {
 }
 
 #[tauri::command]
-fn import_image(path: PathBuf) -> CmdResult<String> {
+fn import_image(chosen: State<'_, Chosen>, path: PathBuf) -> CmdResult<String> {
+    allowed(&chosen, &path)?;
     quire_service::assets::stage_file(&path).map_err(err)
 }
 
@@ -131,8 +303,16 @@ fn stage_image(data: String, ext: String) -> CmdResult<String> {
     quire_service::assets::stage_base64(&data, &ext).map_err(err)
 }
 
+/// An untitled document (`bundle` empty) has only the images added since it was opened.
 #[tauri::command]
-fn read_asset(bundle: PathBuf, src: String) -> CmdResult<String> {
+fn read_asset(chosen: State<'_, Chosen>, bundle: PathBuf, src: String) -> CmdResult<String> {
+    if bundle.as_os_str().is_empty() {
+        if !quire_service::assets::is_staged(&src) {
+            return Err(format!("{src} is missing from this unsaved document"));
+        }
+    } else {
+        allowed(&chosen, &bundle)?;
+    }
     quire_service::read_asset(&bundle, &src).map_err(err)
 }
 
@@ -155,6 +335,7 @@ async fn export_pdf(
     compress: bool,
     info: Option<print::PdfInfo>,
 ) -> CmdResult<()> {
+    allowed(window.state::<Chosen>().inner(), &path)?;
     print::export_pdf(&window, path, paper, title, compress, info.unwrap_or_default())
 }
 
@@ -171,13 +352,16 @@ fn finish_export(app: AppHandle, error: Option<String>) {
 }
 
 /// `quire-app --export-pdf <document.quire> <output.pdf>`: render without showing a window.
-fn export_job() -> Option<Json> {
+/// Returns the document and the PDF as absolute paths with no `..`, as the scope compares them.
+fn export_job() -> Option<(PathBuf, PathBuf)> {
     let args: Vec<String> = std::env::args().collect();
     let i = args.iter().position(|a| a == "--export-pdf")?;
     let (input, output) = (args.get(i + 1)?, args.get(i + 2)?);
     let cwd = std::env::current_dir().ok()?;
     let input = std::fs::canonicalize(cwd.join(input)).ok()?;
-    Some(json!({ "open": input, "pdf": cwd.join(output) }))
+    let output = cwd.join(output);
+    let output = std::fs::canonicalize(output.parent()?).ok()?.join(output.file_name()?);
+    Some((input, output))
 }
 
 fn item(app: &AppHandle, id: &str, label: &str, accel: Option<&str>) -> tauri::Result<MenuItem<Wry>> {
@@ -211,10 +395,39 @@ fn fill_recent(app: &AppHandle, menu: &Submenu<Wry>, paths: &[String]) -> tauri:
     Ok(())
 }
 
+/// The UI's File ▸ Open Recent. Only documents the user chose are kept; they are remembered
+/// for the next session and returned, so the UI's list matches the menu.
 #[tauri::command]
-fn set_recent(app: AppHandle, paths: Vec<String>) -> CmdResult<()> {
+fn set_recent(app: AppHandle, chosen: State<'_, Chosen>, paths: Vec<String>) -> CmdResult<Vec<String>> {
+    let (kept, remembered) = {
+        let mut scope = lock(&chosen);
+        let kept = scope.set_recent(&paths);
+        (kept, scope.remembered().clone())
+    };
+    save_remembered(&app, &remembered)?;
+    let kept: Vec<String> = kept.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     let menu = app.state::<RecentMenu>();
-    fill_recent(&app, &menu.0, &paths).map_err(|e| e.to_string())
+    fill_recent(&app, &menu.0, &kept).map_err(|e| e.to_string())?;
+    Ok(kept)
+}
+
+/// Versions up to 0.2.1 kept the recent lists only in the webview. They are taken over once,
+/// at the first start of a later version and before any document is open (`Scope::adopt`).
+#[tauri::command]
+fn adopt_recent(
+    app: AppHandle,
+    chosen: State<'_, Chosen>,
+    documents: Vec<String>,
+    notebooks: Vec<String>,
+) -> CmdResult<()> {
+    let remembered = {
+        let mut scope = lock(&chosen);
+        scope.adopt(&documents, &notebooks).then(|| scope.remembered().clone())
+    };
+    match remembered {
+        Some(r) => save_remembered(&app, &r),
+        None => Ok(()),
+    }
 }
 
 /// Native menu bar. Custom items are forwarded to the UI as `menu` events carrying the item id;
@@ -435,7 +648,11 @@ fn requests_lock(state: &Requests) -> std::sync::MutexGuard<'_, OpenRequests> {
     state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn request_open(app: &AppHandle, path: String) {
+/// An OS open request is the user's choice: the document joins the scope before the UI sees it.
+fn request_open(app: &AppHandle, path: PathBuf) {
+    let path = scope::document_path(path);
+    lock(&app.state::<Chosen>()).grant_file(&path);
+    let path = path.to_string_lossy().into_owned();
     let state = app.state::<Requests>();
     let mut r = requests_lock(&state);
     if r.ready {
@@ -447,26 +664,54 @@ fn request_open(app: &AppHandle, path: String) {
 
 /// Called once by the UI when it can open documents: hands over what arrived before.
 #[tauri::command]
-fn take_open_requests(state: tauri::State<'_, Requests>) -> Vec<String> {
+fn take_open_requests(state: State<'_, Requests>, chosen: State<'_, Chosen>) -> Vec<String> {
+    lock(&chosen).seal();
     let mut r = requests_lock(&state);
     r.ready = true;
     std::mem::take(&mut r.pending)
 }
 
+/// Images dropped on the window were chosen by the user, like a picked file.
+fn grant_dropped(app: &AppHandle, event: &DragDropEvent) {
+    if let DragDropEvent::Drop { paths, .. } = event {
+        let mut scope = lock(app.state::<Chosen>().inner());
+        for p in paths.iter().filter(|p| quire_service::assets::is_image(p)) {
+            scope.grant_file(p);
+        }
+    }
+}
+
 fn main() {
     let job = export_job();
-    // Windows and Linux pass a double-clicked document as an argument
-    let launch_docs: Vec<String> = if job.is_some() {
+    // Windows and Linux pass a double-clicked document as an argument, maybe a relative one
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let launch_docs: Vec<PathBuf> = if job.is_some() {
         Vec::new()
     } else {
-        std::env::args().skip(1).filter(|a| !a.starts_with('-') && is_document(a)).collect()
+        std::env::args()
+            .skip(1)
+            .filter(|a| !a.starts_with('-') && is_document(a))
+            .filter_map(|a| std::fs::canonicalize(cwd.join(a)).ok())
+            .map(scope::document_path)
+            .collect()
     };
     if std::env::args().any(|a| a == "--export-pdf") && job.is_none() {
         eprintln!("usage: quire-app --export-pdf <document.quire> <output.pdf>");
         std::process::exit(2);
     }
+    // what the command line names was chosen by the user; the saved lists join in `setup`
+    let mut chosen = Scope::default();
+    for p in &launch_docs {
+        chosen.grant_file(p);
+    }
+    if let Some((input, output)) = &job {
+        chosen.grant_file(input);
+        chosen.grant_file(output);
+    }
+    let pending = launch_docs.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     let built = tauri::Builder::default()
-        .manage::<Requests>(std::sync::Mutex::new(OpenRequests { ready: false, pending: launch_docs }))
+        .manage::<Requests>(Mutex::new(OpenRequests { ready: false, pending }))
+        .manage::<Chosen>(Mutex::new(chosen))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -474,10 +719,28 @@ fn main() {
         .on_menu_event(|app, event| {
             let _ = app.emit("menu", event.id().0.as_str());
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drop) = event {
+                grant_dropped(window.app_handle(), drop);
+            }
+        })
+        .on_webview_event(|webview, event| {
+            if let tauri::WebviewEvent::DragDrop(drop) = event {
+                grant_dropped(webview.app_handle(), drop);
+            }
+        })
         .setup(move |app| {
+            {
+                let remembered = load_remembered(app.handle());
+                let mut scope = lock(app.state::<Chosen>().inner());
+                scope.restore(remembered);
+                // your templates, and the images they hold until a new document is saved
+                scope.grant_folder(&templates_dir(app.handle())?);
+            }
             let config = app.config().app.windows.first().cloned().ok_or("tauri.conf.json has no window")?;
             let mut window = WebviewWindowBuilder::from_config(app.handle(), &config)?;
-            if let Some(job) = &job {
+            if let Some((input, output)) = &job {
+                let job = json!({ "open": input, "pdf": output });
                 window =
                     window.visible(false).initialization_script(format!("window.__QUIRE_EXPORT__ = {job};"));
             }
@@ -505,6 +768,8 @@ fn main() {
             notebook,
             take_open_requests,
             set_recent,
+            adopt_recent,
+            pick,
             save_recovery,
             take_recovery,
             clear_recovery
@@ -523,7 +788,7 @@ fn main() {
         if let tauri::RunEvent::Opened { urls } = event {
             for url in urls {
                 if let Ok(path) = url.to_file_path() {
-                    request_open(handle, path.to_string_lossy().into_owned());
+                    request_open(handle, path);
                 }
             }
         }

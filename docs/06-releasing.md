@@ -6,11 +6,13 @@ How a version of Quire reaches users. Only maintainers release.
 
 - Versions follow `0.MINOR.PATCH` for now: a patch for fixes and small features, a minor version for something people would notice in the notes' headline.
 - One version number, in three places: `Cargo.toml` (`[workspace.package]`), `app/package.json` and `app/src-tauri/tauri.conf.json`.
-- Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds on Windows, Linux (Ubuntu 22.04) and macOS (universal), signs the update packages, and attaches 14 files to a **draft** release, including `latest.json`.
+- Pushing a `v*` tag runs `.github/workflows/release.yml`. Its first job checks that the tag is `v` + the version in all three files, that the commit is on `main`, and that CI passed on it (waiting up to an hour while CI is still running); any failure stops the release before anything is built. Then it builds on Windows, Linux (Ubuntu 22.04) and macOS (universal), signs the update packages, and attaches 14 files to a **draft** release, including `latest.json`. *Run workflow* in the Actions tab works from `main` only.
+- The build job holds the updater key, so every action it uses is pinned by commit SHA; Dependabot (`.github/dependabot.yml`) proposes updates as pull requests. Review those like code.
+- Rust is pinned in `rust-toolchain.toml`. Raise it in its own pull request, so a new compiler's warnings are fixed before a release depends on it.
 - Installed copies ask `https://github.com/guidofraga/quire/releases/latest/download/latest.json` for updates (`tauri.conf.json` ▸ `plugins.updater`). That URL only follows **published** releases, so a draft is invisible to users until you publish it.
 - Update packages are signed with the updater key; the app checks them against the public key in `tauri.conf.json` and refuses anything else.
 
-The web version is separate: `.github/workflows/pages.yml` publishes it to https://guidofraga.github.io/quire/ on every push to `main`, so it is usually a little ahead of the installers. Documents keep the same format, so links work in both.
+The web version is separate: `.github/workflows/pages.yml` publishes it to https://guidofraga.github.io/quire/ each time CI passes on a push to `main` (from the commit CI checked), so it is usually a little ahead of the installers. A push whose CI fails is not published. Documents keep the same format, so links work in both.
 
 ## 2. Steps
 
@@ -39,7 +41,7 @@ The web version is separate: `.github/workflows/pages.yml` publishes it to https
    git push origin main v0.1.12
    ```
 
-4. **Wait for both workflows.** CI runs on the version commit and Release builds the draft (about 10–20 minutes). If CI fails, fix it on `main` before publishing; a fix that only touches tests leaves the installers valid, anything else needs a new patch version.
+4. **Wait for both workflows.** CI runs on the version commit; Release waits for it, then builds the draft (about 10–20 minutes more). If CI fails, Release stops without building: fix it on `main` and release a new patch version (never move the tag). If the version check fails, the three files disagree or the tag has a typo: delete the unpublished tag (`git push origin :v0.1.12`), fix, and tag again.
 5. **Write the notes** (template below) and publish:
 
    ```bash
@@ -97,5 +99,6 @@ Leave out sections that would be empty. Say if documents written by the new vers
 ## 5. When something goes wrong
 
 - **A platform failed to build:** re-run the failed job from the Actions tab; the draft collects the files of every job.
+- **Release stopped at "CI passed on this commit":** CI failed or was still running after an hour. Once CI is green on that commit, re-run the Release workflow.
 - **A bad release is out:** publish a fixed patch version quickly; the updater moves everyone to it. Deleting a published release makes `latest` fall back to the previous one, which is also an option for a release that can't be fixed fast.
 - **Never move a published tag.** Make a new version instead.

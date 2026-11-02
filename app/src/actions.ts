@@ -53,7 +53,7 @@ import {
   state,
   updateRegion,
 } from "./store";
-import type { Region } from "./types";
+import type { Region, RegionView } from "./types";
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp)$/i;
 
@@ -89,14 +89,24 @@ function clipOf(regions: Region[]): Clip {
   return { regions, assets };
 }
 
+/**
+ * The engine's results to export with: its rendering of text and captions, and the results
+ * of math and tables. Empty while they are behind the document (an edit's evaluation is on
+ * its way): a copy then carries what was typed rather than what the page showed before.
+ */
+interface Shown {
+  html: Record<string, string>;
+  views: Record<string, RegionView>;
+}
+
 /** Rendered text (or a caption) as it reads on the page: live math, references, heading number. */
-function renderedHtml(key: string, number?: string): string | null {
-  const html = state.report?.html[key];
+function renderedHtml(shown: Shown, key: string, number?: string): string | null {
+  const html = shown.html[key];
   if (html === undefined) return null;
   const el = document.createElement("div");
   el.innerHTML = html;
   for (const span of el.querySelectorAll<HTMLElement>("[data-math]")) {
-    const v = state.views[span.dataset.math!];
+    const v = shown.views[span.dataset.math!];
     span.innerHTML = v?.input ? mathml(v.input, v.error ? null : v.result, v.units, v.constants, v.symbolic) : "";
   }
   fillRefs(el);
@@ -106,25 +116,25 @@ function renderedHtml(key: string, number?: string): string | null {
 }
 
 /** A spreadsheet table's cells as they read on the page. */
-function shownCells(r: Region): string[][] {
-  const cells = state.views[r.id]?.cells;
+function shownCells(shown: Shown, r: Region): string[][] {
+  const cells = shown.views[r.id]?.cells;
   return rowsOf(r).map((row, i) => row.map((raw, j) => cellText(raw, cells?.[i]?.[j])));
 }
 
-function captionHtml(r: Region): string {
+function captionHtml(shown: Shown, r: Region): string {
   if (!r.caption) return "";
   const number = layout().byId.get(r.id)?.number;
   const label = number ? `${captionLabel(r.kind === "table" ? "table" : "figure", number)} ` : "";
-  const text = renderedHtml(`${r.id}:caption`) ?? escapeHtml(localized(r.caption.text, state.doc.meta?.lang));
+  const text = renderedHtml(shown, `${r.id}:caption`) ?? escapeHtml(localized(r.caption.text, state.doc.meta?.lang));
   return `<p><i>${escapeHtml(label)}</i>${portableHtml(text)}</p>`;
 }
 
 /** One region for other apps: HTML, and plain text lines. */
-function exportRegion(r: Region): { html: string; text: string } {
+function exportRegion(shown: Shown, r: Region): { html: string; text: string } {
   const lang = state.doc.meta?.lang;
   switch (r.kind) {
     case "math": {
-      const v = state.views[r.id];
+      const v = shown.views[r.id];
       const line = editText(r);
       const html = v?.input
         ? mathParagraph(mathml(v.input, v.error ? null : v.result, v.units, v.constants, v.symbolic), line)
@@ -132,7 +142,7 @@ function exportRegion(r: Region): { html: string; text: string } {
       return { html, text: line };
     }
     case "text": {
-      const html = renderedHtml(r.id, layout().byId.get(r.id)?.number);
+      const html = renderedHtml(shown, r.id, layout().byId.get(r.id)?.number);
       if (html === null) {
         const t = localized(r.text, lang);
         return { html: `<p>${escapeHtml(t)}</p>`, text: t };
@@ -143,12 +153,14 @@ function exportRegion(r: Region): { html: string; text: string } {
       const url = r.src ? state.assets[r.src] : undefined;
       const [w, h] = r.size ?? [200, 150];
       const img = url ? `<p><img src="${escapeHtml(url)}" width="${w}" height="${h}" alt=""></p>` : "";
-      const caption = captionHtml(r);
+      const caption = captionHtml(shown, r);
       return { html: r.caption?.position === "above" ? caption + img : img + caption, text: "" };
     }
     case "area": {
       const title = localized(r.title, lang);
-      const parts = [...(r.regions ?? [])].sort((a, b) => a.at[1] - b.at[1] || a.at[0] - b.at[0]).map(exportRegion);
+      const parts = [...(r.regions ?? [])]
+        .sort((a, b) => a.at[1] - b.at[1] || a.at[0] - b.at[0])
+        .map((x) => exportRegion(shown, x));
       return {
         html: (title ? `<p><b>${escapeHtml(title)}</b></p>` : "") + parts.map((p) => p.html).join(""),
         text: [title, ...parts.map((p) => p.text)].filter(Boolean).join("\n"),
@@ -156,16 +168,16 @@ function exportRegion(r: Region): { html: string; text: string } {
     }
   }
   if (isSheet(r)) {
-    const cells = shownCells(r);
+    const cells = shownCells(shown, r);
     const table = tableHtml(cells, {
       headerRow: r.header?.row,
       headerColumn: r.header?.column,
       align: columnsOf(r).map((c) => c.align),
     });
-    const caption = captionHtml(r);
+    const caption = captionHtml(shown, r);
     return { html: r.caption?.position === "below" ? table + caption : caption + table, text: tsv(cells) };
   }
-  return { html: captionHtml(r), text: "" };
+  return { html: captionHtml(shown, r), text: "" };
 }
 
 /** Text for the next copy event (Copy Result, Copy as LaTeX). */
@@ -180,9 +192,10 @@ function copyText(text: string, what: string) {
 
 /**
  * Copy the selected regions: as regions for Quire (any window, any document, after a
- * restart), as HTML for Word and the like, and as plain text.
+ * restart), as HTML for Word and the like, and as plain text. `current`: the results on
+ * screen are those of the document as it is now.
  */
-export function onCopy(e: ClipboardEvent, cut: boolean) {
+export function onCopy(e: ClipboardEvent, cut: boolean, current: boolean) {
   if (pendingText !== null) {
     e.clipboardData?.setData("text/plain", pendingText);
     e.preventDefault();
@@ -192,7 +205,8 @@ export function onCopy(e: ClipboardEvent, cut: boolean) {
   const regions = selectedRegions();
   const clip = clipOf(regions);
   internalClipboard = clip;
-  const parts = regions.map(exportRegion);
+  const shown: Shown = current ? { html: state.report?.html ?? {}, views: state.views } : { html: {}, views: {} };
+  const parts = regions.map((r) => exportRegion(shown, r));
   e.clipboardData?.setData(REGIONS_TYPE, encodeClip(clip));
   e.clipboardData?.setData("text/html", clipHtml(parts.map((p) => p.html).join(""), clip));
   e.clipboardData?.setData(
@@ -453,12 +467,8 @@ export async function insertImageBlob(file: Blob, at?: [number, number]) {
 /** Ask for an image file (Tauri dialog, or a file input in a browser). */
 export async function pickImage(): Promise<{ path?: string; file?: File } | null> {
   if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const p = await open({
-      title: "Insert image",
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "svg", "webp"] }],
-    });
-    return typeof p === "string" ? { path: p } : null;
+    const p = await api.pick("image");
+    return p ? { path: p } : null;
   }
   return new Promise((resolve) => {
     const input = document.createElement("input");

@@ -157,6 +157,85 @@ test.describe("keyboard", () => {
     );
   });
 
+  test("the result of math just edited is spoken once, when it is worked out", async ({ page }) => {
+    // everything the polite and assertive live regions say, in order
+    await page.evaluate(() => {
+      const heard: string[] = [];
+      (window as unknown as { heard: string[] }).heard = heard;
+      for (const el of document.querySelectorAll('[role="status"], [role="alert"]')) {
+        new MutationObserver(() => {
+          const t = el.textContent?.trim();
+          if (t) heard.push(`${el.getAttribute("role")}: ${t}`);
+        }).observe(el, { childList: true, characterData: true, subtree: true });
+      }
+    });
+    const heard = () => page.evaluate(() => (window as unknown as { heard: string[] }).heard);
+    await page.mouse.click(700, 250);
+    await page.keyboard.type("q:=12 kN/m");
+    await page.keyboard.press("Enter");
+    await expect.poll(heard).toEqual(["status: Math: q is defined as 12 kilonewtons per metre"]);
+    // nothing while typing, even once the result shows; Esc leaves the line selected and
+    // it is described once, with its result
+    await page.keyboard.type("M:=q*2=");
+    await expect(page.locator(".region.math").nth(1)).toContainText(/=24\s*kN/);
+    // the units it can be shown in are offered; the first Esc closes that list
+    await expect(page.getByRole("listbox", { name: "Show in" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("listbox", { name: "Show in" })).toBeHidden();
+    expect(await heard()).toHaveLength(1);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".math-input")).toHaveCount(0);
+    await expect
+      .poll(heard)
+      .toEqual([
+        "status: Math: q is defined as 12 kilonewtons per metre",
+        "status: Math: M is defined as q times 2, equals 24 kilonewtons per metre",
+      ]);
+    // an error is still said at once, and only the error
+    await page.keyboard.press("Escape");
+    await page.mouse.click(700, 400);
+    await page.keyboard.type("x:=y+1");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await heard()).slice(2)).toEqual([expect.stringMatching(/^alert: Error: .*\by\b/)]);
+  });
+
+  test("Tab after leaving a region goes on from that region", async ({ page }) => {
+    await page.mouse.click(700, 250);
+    for (const line of ["a:=1", "b:=2", "c:=3"]) {
+      await page.keyboard.type(line);
+      await page.keyboard.press("Enter");
+    }
+    const math = page.locator(".region.math");
+    await expect(math).toHaveCount(3);
+    // left with Enter: ⇧Tab goes to the one before the region just left, not the last
+    await page.keyboard.press("Shift+Tab");
+    await expect(math.nth(1)).toHaveClass(/\bselected\b/);
+    // and Tab to the one after, not the first
+    await math.nth(0).dblclick();
+    await expect(page.locator(".math-input")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".math-input")).toHaveCount(0);
+    await page.keyboard.press("Tab");
+    await expect(math.nth(1)).toHaveClass(/\bselected\b/);
+    await expect(page.getByRole("status")).toHaveText("Math: b is defined as 2");
+  });
+
+  test("the selected plot resizes with ⌘ and the arrows, one undo step each", async ({ page }) => {
+    await page.keyboard.press("ControlOrMeta+Alt+p");
+    const plot = page.locator(".region.plot2d");
+    await expect(plot).toHaveClass(/\bselected\b/);
+    const width = async () => (await plot.boundingBox())!.width;
+    const before = await width();
+    await page.keyboard.press("Meta+ArrowRight");
+    await expect(page.getByRole("status")).toHaveText("449 by 260");
+    await page.keyboard.press("Meta+Shift+ArrowDown");
+    await expect(page.getByRole("status")).toHaveText("449 by 305");
+    expect(await width()).toBeGreaterThan(before);
+    await page.keyboard.press("ControlOrMeta+z");
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect.poll(width).toBe(before);
+  });
+
   test("a table being edited is a grid with named cells", async ({ page }) => {
     await page.keyboard.press("ControlOrMeta+Alt+t");
     const grid = page.getByRole("grid");

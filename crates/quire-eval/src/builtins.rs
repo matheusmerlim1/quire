@@ -4,7 +4,8 @@
 use quire_ast::BinaryOp;
 use quire_units::{Dim, Rational};
 
-use crate::error::{Result, bail, internal};
+use crate::budget::MAX_ELEMENTS;
+use crate::error::{EvalError, Result, bail, internal};
 use crate::format::{DisplaySettings, describe_dim, format_number};
 use crate::ops::{self, arith, same_dim, uniform};
 use crate::value::{Matrix, Quantity, Value};
@@ -102,6 +103,16 @@ pub fn index(base: &Value, idx: &[Value]) -> Result<Value> {
 }
 
 fn concat_blocks(name: &str, args: &[Value], vertical: bool) -> Result<Value> {
+    // the size of the result, before any block is copied
+    let total = args.iter().try_fold(0usize, |n, v| {
+        n.checked_add(match v {
+            Value::Matrix(m) => m.data.len(),
+            _ => 1,
+        })
+    });
+    if total.is_none_or(|n| n > crate::budget::MAX_ELEMENTS) {
+        bail!("{name}: the result is too large (at most {} elements)", crate::budget::MAX_ELEMENTS);
+    }
     let blocks: Vec<Matrix> = args
         .iter()
         .map(|v| match v {
@@ -148,8 +159,8 @@ pub fn range(a: Quantity, b: Quantity, step: Option<Quantity>) -> Result<Value> 
         bail!("the range step never reaches the end value");
     }
     let count = ((b.v - a.v) / step.v + 1e-9).floor() + 1.0;
-    if !count.is_finite() || count > 10_000_000.0 {
-        bail!("the range has too many elements ({count:.3e})");
+    if !count.is_finite() || count > MAX_ELEMENTS as f64 {
+        bail!("the range has too many elements ({count:.3e}; at most {MAX_ELEMENTS})");
     }
     let n = count as usize;
     let data = (0..n).map(|k| Value::Num(Quantity::new(a.v + k as f64 * step.v, a.dim))).collect();
@@ -182,9 +193,12 @@ pub fn call(name: &str, args: &[Value]) -> Option<Result<Value>> {
         "cosh" => real(name, f64::cosh, args),
         "tanh" => real(name, f64::tanh, args),
         "coth" => real(name, |x| 1.0 / x.tanh(), args),
+        "sech" => real(name, |x| 1.0 / x.cosh(), args),
+        "csch" => real(name, |x| 1.0 / x.sinh(), args),
         "asinh" => real(name, f64::asinh, args),
         "acosh" => real(name, f64::acosh, args),
         "atanh" => real(name, f64::atanh, args),
+        "acoth" => real(name, |x| (1.0 / x).atanh(), args),
         "atan2" => atan2(args),
         "floor" => real(name, f64::floor, args),
         "ceil" => real(name, f64::ceil, args),
@@ -216,7 +230,11 @@ pub fn call(name: &str, args: &[Value]) -> Option<Result<Value>> {
         "concat" => concat(args),
         "eval" => arity(name, args, |n| n == 1, "1 argument").and_then(|_| Ok(arg(args, 0)?.clone())),
         "sys" => crate::plot::sys(args),
-        _ => return crate::linalg::call(name, args).or_else(|| crate::stats::call(name, args)),
+        _ => {
+            return crate::linalg::call(name, args)
+                .or_else(|| crate::stats::call(name, args))
+                .or_else(|| crate::special::call(name, args));
+        }
     };
     Some(r)
 }
@@ -394,7 +412,7 @@ fn two_vectors(name: &str, args: &[Value]) -> Result<(Vector, Vector)> {
 
 fn dot(args: &[Value]) -> Result<Value> {
     let ((a, da), (b, db)) = two_vectors("dot", args)?;
-    Ok(Value::Num(Quantity::new(a.iter().zip(&b).map(|(x, y)| x * y).sum(), da * db)))
+    Ok(Value::Num(Quantity::new(a.iter().zip(&b).map(|(x, y)| x * y).sum(), dim_mul(da, db)?)))
 }
 
 fn cross(args: &[Value]) -> Result<Value> {
@@ -403,7 +421,7 @@ fn cross(args: &[Value]) -> Result<Value> {
         ([a0, a1, a2], [b0, b1, b2]) => vec![a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0],
         _ => bail!("cross needs two vectors of 3 elements"),
     };
-    Ok(column(c, da * db))
+    Ok(column(c, dim_mul(da, db)?))
 }
 
 /// `lsolve(A, b)`: the x that makes A·x = b.
@@ -420,7 +438,10 @@ fn lsolve(args: &[Value]) -> Result<Value> {
     if rows != a.rows {
         bail!("lsolve: b needs {} rows to match the matrix, not {rows}", a.rows);
     }
-    let inv = ops::inverse(a).map_err(|_| crate::error::EvalError::new("lsolve: the matrix is singular"))?;
+    let inv = match ops::inverse(a) {
+        Err(e) if e.message == "the matrix is singular" => bail!("lsolve: the matrix is singular"),
+        r => r?,
+    };
     arith(BinaryOp::Mul, &inv, arg(args, 1)?)
 }
 
@@ -479,8 +500,9 @@ fn transpose(args: &[Value]) -> Result<Value> {
 fn identity(args: &[Value]) -> Result<Value> {
     arity("identity", args, |n| n == 1, "1 argument")?;
     let n = arg(args, 0)?.as_int("the size")?;
-    if !(1..=10_000).contains(&n) {
-        bail!("identity size must be between 1 and 10000");
+    // n×n elements, at most MAX_ELEMENTS
+    if !(1..=1000).contains(&n) {
+        bail!("identity size must be between 1 and 1000");
     }
     Ok(Value::Matrix(ops::identity(n as usize)))
 }
@@ -530,7 +552,28 @@ fn concat(args: &[Value]) -> Result<Value> {
     Ok(Value::Str(s))
 }
 
-/// Dimension of `x^n` for display of derivatives and integrals.
-pub fn dim_pow(d: Dim, n: i32) -> Dim {
-    d.pow(Rational::int(n))
+/// Dimension of `x^n`, as of derivatives and integrals.
+pub fn dim_pow(d: Dim, n: i32) -> Result<Dim> {
+    dim_pow_r(d, Rational::int(n))
+}
+
+/// Dimension of `x^r`: `('m^2)^(1/2)` is m.
+pub(crate) fn dim_pow_r(d: Dim, r: Rational) -> Result<Dim> {
+    d.pow(r).ok_or_else(exponents_too_large)
+}
+
+/// Dimension of a product.
+pub(crate) fn dim_mul(a: Dim, b: Dim) -> Result<Dim> {
+    a.checked_mul(b).ok_or_else(exponents_too_large)
+}
+
+/// Dimension of a quotient.
+pub(crate) fn dim_div(a: Dim, b: Dim) -> Result<Dim> {
+    a.checked_div(b).ok_or_else(exponents_too_large)
+}
+
+/// Exponents are exact fractions of 32-bit whole numbers; a power such as
+/// `('m^1000000)^1000000`, or many nested square roots, goes past them.
+fn exponents_too_large() -> EvalError {
+    EvalError::new("the powers of the units in this result are too large to keep exactly")
 }

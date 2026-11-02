@@ -1,0 +1,9 @@
+# The Rust that CI, releases and contributors build with, so a new stable release can't break
+# `clippy -D warnings` overnight. Raise it on purpose, in its own change. The oldest Rust the
+# code still builds with is `rust-version` in Cargo.toml, which CI checks separately.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+# the web version's engine (crates/quire-web)
+targets = ["wasm32-unknown-unknown"]

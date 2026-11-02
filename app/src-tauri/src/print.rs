@@ -21,7 +21,11 @@ use tauri::WebviewWindow;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
+// The front end sends these on every system, but only macOS and Linux write the PDF and read
+// them; Windows prints through the system dialog.
+
 /// Paper size in PostScript points (1/72 in), already rotated for landscape.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Paper {
@@ -30,6 +34,7 @@ pub struct Paper {
 }
 
 /// A place on a page: page index from 0, and points from the top of the paper.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 pub struct Spot {
     pub page: usize,
@@ -37,6 +42,7 @@ pub struct Spot {
 }
 
 /// A bookmark for a heading; `title` already carries its number ("2.1 Bending").
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Heading {
     pub title: String,
@@ -47,6 +53,7 @@ pub struct Heading {
 
 /// A clickable box the print engine does not make itself (a contents-list row), in points
 /// from the paper's top-left corner, that jumps to the region `to`.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinkBox {
     pub page: usize,

@@ -24,7 +24,7 @@ import {
   untrack,
 } from "solid-js";
 import { produce } from "solid-js/store";
-import { api } from "./api";
+import { api, isMac } from "./api";
 import { cellHtml, esc, mathml, prettyValue } from "./math";
 import { mathWords } from "./describe";
 import { spokenMath } from "./speech";
@@ -621,20 +621,52 @@ function ContentsBody(props: { p: Placed }) {
 }
 
 /** Drag handle that sets a text region's width or an image's size (Shift: free aspect). */
+/** The size an image or plot is shown at, `size` or the default its body falls back to. */
+function shownSize(r: Region): [number, number] {
+  return r.size ?? (r.kind === "plot2d" ? DEFAULT_SIZE : [200, 150]);
+}
+
+/** Whether a region is resized as a box (image, plot) rather than by its width (text). */
+export const resizable = (r: Region | undefined) => r?.kind === "image" || r?.kind === "plot2d";
+
+/**
+ * Resize an image or plot from the keyboard by `dw` and `dh`, one undo step. An image
+ * keeps its proportions, as it does when dragged. Returns the new size.
+ */
+export function resizeBy(id: string, dw: number, dh: number): [number, number] | null {
+  const r = layout().byId.get(id)?.region;
+  if (!r || !resizable(r)) return null;
+  const [w0, h0] = shownSize(r);
+  let size: [number, number];
+  if (r.kind === "image") {
+    const w = Math.max(24, w0 + (dw || dh));
+    size = [w, Math.max(16, Math.round((w * h0) / w0))];
+  } else size = [Math.max(160, w0 + dw), Math.max(120, h0 + dh)];
+  if (size[0] !== w0 || size[1] !== h0) updateRegion(id, { size });
+  return size;
+}
+
 function ResizeHandle(props: { p: Placed }) {
   const r = () => props.p.region;
   const onDown = (e: PointerEvent) => {
+    if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
     const id = r().id;
     const startX = e.clientX;
     const startY = e.clientY;
-    const sized = r().kind === "image" || r().kind === "plot2d";
-    const w0 = sized ? (r().size?.[0] ?? 200) : (r().width ?? widths[id] ?? 200);
-    const h0 = r().size?.[1] ?? 150;
+    const sized = resizable(r());
+    const [w0, h0] = sized ? shownSize(r()) : [r().width ?? widths[id] ?? 200, 0];
     const ratio = h0 / w0;
-    checkpoint();
+    // the undo step is taken on the first move, as when dragging a region: a click that
+    // doesn't drag changes nothing, so it mustn't mark the document edited or clear Redo
+    let moved = false;
     const move = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 3) return;
+      if (!moved) {
+        moved = true;
+        checkpoint();
+      }
       const w = Math.max(24, Math.round((w0 + (ev.clientX - startX) / state.view.zoom) / GRID) * GRID);
       const free = Math.max(16, Math.round(h0 + (ev.clientY - startY) / state.view.zoom));
       setState(
@@ -648,20 +680,23 @@ function ResizeHandle(props: { p: Placed }) {
         }),
       );
     };
-    const up = () => {
+    // a cancelled pointer (the system took it over) keeps the size reached so far, like a release
+    const end = () => {
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      setState({ dirty: true, rev: state.rev + 1 });
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      if (moved) setState({ dirty: true, rev: state.rev + 1 });
     };
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
   };
   return (
     <div
       class="resize-handle"
-      classList={{ corner: r().kind === "image" || r().kind === "plot2d" }}
+      classList={{ corner: resizable(r()) }}
       onPointerDown={onDown}
-      title="Drag to resize"
+      title={resizable(r()) ? `Drag to resize (${isMac ? "⌘" : "Ctrl+"}Arrows)` : "Drag to resize"}
     />
   );
 }
