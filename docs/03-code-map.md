@@ -82,7 +82,8 @@ Saving is the same path in reverse: `api.save` → `quire_service::save`, which 
 
 | File | What lives there |
 |---|---|
-| `main.rs` | Tauri commands (thin wrappers over `quire-service`), the native menu with its accelerators, Open Recent, crash recovery, files the system asks to open, the window setup. |
+| `main.rs` | Tauri commands (thin wrappers over `quire-service`), the native file dialogs (`pick`), the native menu with its accelerators, Open Recent, crash recovery, files the system asks to open, the window setup. |
+| `scope.rs` | The files and folders the app may touch: only those the user chose in a dialog, opened from the system, dropped on the window, or kept in the recent lists (saved in the app's data folder as `recent.json`). Every command that takes a path checks it here, so a new command that reads or writes a file must too; a new file dialog goes through `pick`, never the dialog plugin in the webview. |
 | `print.rs` | Printing and PDF export through WebKit's print engine, at the exact paper size: AppKit's save job on macOS, GTK's "Print to File" backend on Linux (the printer is named in the user's language). Windows only prints, through the dialog. |
 | `pdf.rs` | Finishing the exported PDF with `lopdf` (macOS and Linux): details, bookmarks, links, page labels, smaller photos. |
 | `tauri.conf.json`, `capabilities/` | Window, bundle, updater and permission configuration. |
@@ -99,7 +100,7 @@ SolidJS with fine-grained signals and stores, plain CSS, no component library. F
 | `main.tsx` | Mounts `App`. |
 | `App.tsx` | The window: layout, live evaluation, open/save/export, `runCommand` (every menu and palette command by id), keyboard shortcuts in a browser, startup. |
 | `store.ts` | The editor state: document, report, selection, editing, viewport, undo history, layout of regions (`computeLayout`), region operations. |
-| `api.ts` | The bridge to Rust: `call(cmd, args)` invokes a Tauri command, the WebAssembly engine (`isWeb`) or posts to `/api`. Also file dialogs, menus, window close. |
+| `api.ts` | The bridge to Rust: `call(cmd, args)` invokes a Tauri command, the WebAssembly engine (`isWeb`) or posts to `/api`. Also file dialogs (run by the desktop app through `api.pick`), menus, window close. |
 | `engine.ts` | Loads `quire_web.wasm` and calls it, in the web version. |
 | `latest.ts` | Live evaluation's requests: debounced, and only the newest answer is shown. |
 | `types.ts` | TypeScript mirrors of the document JSON and of `quire-service`'s report. |

@@ -26,7 +26,7 @@ If something here is unclear or out of date, fixing it is a welcome first contri
 
 ## Getting set up
 
-You need Rust (1.90 or newer, edition 2024) with the WebAssembly target (`rustup target add wasm32-unknown-unknown`, for the web version), and Node 22. For the desktop app, also the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your system.
+You need [rustup](https://rustup.rs) and Node 22. `rust-toolchain.toml` picks the Rust version, with clippy, rustfmt and the WebAssembly target (for the web version); rustup installs it the first time you run `cargo` here. The code also builds with Rust 1.90 (`rust-version` in `Cargo.toml`), which CI checks. For the desktop app, also the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your system.
 
 ```bash
 npm --prefix app ci
@@ -44,7 +44,7 @@ Day to day:
 | Test the UI's logic | `npm --prefix app test` (Vitest; `run test:watch` while you work) |
 | Try the UI end to end | `npm --prefix app run e2e` (Playwright in WebKit; once: `npx --prefix app playwright install webkit`) |
 | Retake the README's pictures | `npm --prefix app run screenshots` (writes `docs/images`) |
-| Check PDF export (macOS) | `npm --prefix app run build`, then `cargo test -p quire-app --features tauri/custom-protocol -- --ignored` |
+| Test the desktop app, and check PDF export (macOS, Linux) | `npm --prefix app run build`, then `cargo test -p quire-app --features tauri/custom-protocol -- --include-ignored` |
 | Build `Quire.app` / the installers | `npm --prefix app run tauri build` (add `-- --bundles app` for just the macOS app) |
 | Try one expression | `cargo run -q -p quire-cli -- calc "2 m + 30 cm" --in mm` |
 
@@ -61,6 +61,8 @@ cargo test --workspace --exclude quire-app
 cd app && npm run format:check && npx tsc --noEmit && npm test && npm run e2e
 ```
 
+If you changed the desktop shell (`app/src-tauri`), also run `cargo clippy -p quire-app --all-targets -- -D warnings` and `cargo test -p quire-app` after `npm --prefix app run build`. CI runs them on Linux, macOS and Windows, and builds the web version (`npm --prefix app run build:web`).
+
 And:
 
 - **Changes come with tests.** Engine tests next to the code, UI logic in a `*.test.ts` next to the module, what a user sees end to end in `app/e2e`. See [Testing](docs/05-testing.md).
@@ -68,6 +70,8 @@ And:
 - **New UI works from the keyboard and with a screen reader**, and passes the axe tests. See [Guidelines §4](docs/04-guidelines.md#4-accessibility).
 - **File-format changes** update `docs/02-file-format.md` and `schema/quire-1.schema.json` in the same change. Documents written by earlier versions must keep opening unchanged.
 - **Results must not change by accident.** If a change alters what an existing worksheet shows, say so and why.
+- **The desktop app only touches files the user chose.** A command that takes a path checks it against the scope (`app/src-tauri/src/scope.rs`), and file dialogs run in Rust (`pick`), not in the webview.
+- **Workflows pin actions by commit**, with the version in a comment (`uses: actions/checkout@<sha> # v7.0.1`). Dependabot keeps them current.
 - **Docs stay true.** If you move code or change a convention, update the page in `docs/` that describes it.
 
 ## Commits

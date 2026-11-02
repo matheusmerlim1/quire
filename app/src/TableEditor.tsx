@@ -521,11 +521,10 @@ export async function exportCsv(id: string) {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     return;
   }
-  const { save } = await import("@tauri-apps/plugin-dialog");
-  const path = await save({ defaultPath: suggested, filters: [{ name: "CSV", extensions: ["csv"] }] });
+  const path = await api.pick("csv", suggested);
   if (!path) return;
   try {
-    await api.exportCsv(path.toLowerCase().endsWith(".csv") ? path : `${path}.csv`, csv);
+    await api.exportCsv(path, csv);
     flash(`Exported ${rows.length} rows`);
   } catch (e) {
     flash(`Could not export the table: ${(e as Error).message}`);

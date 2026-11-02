@@ -1,17 +1,19 @@
 # The web version on GitHub Pages (https://guidofraga.github.io/quire/): the engine as
-# WebAssembly and the UI, rebuilt on every push to main. Everything runs in the visitor's
+# WebAssembly and the UI. It is published once CI has passed on a push to main, from exactly the
+# commit CI checked, so a failing main never reaches visitors. Everything runs in the visitor's
 # browser; documents travel in links, so the site stores nothing.
 name: Pages
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
+  # by hand, from main only (checked below)
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -19,14 +21,19 @@ concurrency:
 
 jobs:
   build:
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: wasm32-unknown-unknown
-      - uses: swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -34,16 +41,19 @@ jobs:
       - name: Build the web version
         run: npm ci && npm run build:web
         working-directory: app
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: app/dist-web
 
   deploy:
     needs: build
     runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

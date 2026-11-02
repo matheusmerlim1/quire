@@ -1,7 +1,10 @@
-# Engine tests, front-end type check, unit tests and end-to-end tests (the desktop UI against
-# `quire serve`, and the web version with its WebAssembly engine) on every push; and the
-# desktop app itself built and linted on Linux, with a real PDF export, so platform code that
-# the other job never compiles is checked before a release.
+# Engine tests, front-end type check, unit tests, the web version's build and end-to-end tests
+# (the desktop UI against `quire serve`, and the web version with its WebAssembly engine) on
+# every push; and the desktop app itself built, linted and unit-tested on Linux, macOS and
+# Windows, with a real PDF export on Linux, so platform code is checked before a release.
+#
+# Rust comes from rust-toolchain.toml; `--locked` keeps Cargo.lock as committed. Third-party
+# actions are pinned by commit (Dependabot proposes updates, .github/dependabot.yml).
 name: CI
 
 on:
@@ -9,25 +12,25 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-          # the web version's engine (crates/quire-web), built for the e2e tests of the web version
-          targets: wasm32-unknown-unknown
-      - uses: swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Engine tests
-        run: cargo test --workspace --exclude quire-app
+        run: cargo test --workspace --exclude quire-app --locked
       - name: Lint
         run: |
           cargo fmt --all --check
-          cargo clippy --workspace --exclude quire-app --all-targets -- -D warnings
-          cargo clippy -p quire-web --target wasm32-unknown-unknown -- -D warnings
-      - uses: actions/setup-node@v4
+          cargo clippy --workspace --exclude quire-app --all-targets --locked -- -D warnings
+          cargo clippy -p quire-web --target wasm32-unknown-unknown --locked -- -D warnings
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -41,12 +44,16 @@ jobs:
       - name: Front-end unit tests
         run: npm test
         working-directory: app
+      # what pages.yml publishes, so a change that breaks it fails here and not after merging
+      - name: Build the web version
+        run: npm run build:web
+        working-directory: app
       - name: End-to-end smoke test (WebKit)
         run: |
           npx playwright install --with-deps webkit
           npm run e2e
         working-directory: app
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: playwright-traces
@@ -56,16 +63,15 @@ jobs:
   app-linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -75,7 +81,40 @@ jobs:
         run: npm ci && npm run build
         working-directory: app
       - name: Lint the desktop app
-        run: cargo clippy -p quire-app --all-targets -- -D warnings
-      # WebKitGTK lays out and prints the page view, in a virtual display
-      - name: Export a PDF (Linux)
-        run: xvfb-run -a cargo test -p quire-app --features tauri/custom-protocol -- --ignored
+        run: cargo clippy -p quire-app --all-targets --locked -- -D warnings
+      # the unit tests (scope.rs, pdf.rs), and the PDF export, which WebKitGTK lays out and
+      # prints in a virtual display
+      - name: Test the desktop app and export a PDF (Linux)
+        run: xvfb-run -a cargo test -p quire-app --features tauri/custom-protocol --locked -- --include-ignored
+      # the oldest Rust Cargo.toml promises (`rust-version`) must still build everything
+      - name: Minimum supported Rust
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          cargo "+$msrv" check --workspace --all-targets --locked
+
+  # AppKit printing (print.rs), RunEvent::Opened and the Windows branches are only compiled here
+  app-macos-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Front end
+        run: npm ci && npm run build
+        working-directory: app
+      - name: Lint the desktop app
+        run: cargo clippy -p quire-app --all-targets --locked -- -D warnings
+      # the PDF export needs a desktop session, so only the unit tests run here
+      - name: Test the desktop app
+        run: cargo test -p quire-app --locked

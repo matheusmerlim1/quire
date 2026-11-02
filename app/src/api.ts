@@ -62,9 +62,20 @@ export const api = {
   takeRecovery: () =>
     isTauri ? call<{ doc: Doc; path: string | null } | null>("take_recovery") : Promise.resolve(null),
   clearRecovery: () => (isTauri ? call<null>("clear_recovery") : Promise.resolve(null)),
-  setRecent: (paths: string[]) => (isTauri ? call<null>("set_recent", { paths }) : Promise.resolve(null)),
+  /** File ▸ Open Recent; the desktop app keeps only documents the user chose, and returns them. */
+  setRecent: (paths: string[]) => (isTauri ? call<string[]>("set_recent", { paths }) : Promise.resolve(paths)),
+  /** Hand the recent lists of versions that kept them only here to the desktop app (once). */
+  adoptRecent: (documents: string[], notebooks: string[]) =>
+    isTauri ? call<null>("adopt_recent", { documents, notebooks }) : Promise.resolve(null),
+  /**
+   * A native dialog. The desktop app runs it itself, so that what the user picks is all it may
+   * read or write; it also adds the extension a saved file needs.
+   */
+  pick: (kind: PickKind, suggested?: string) => call<string | null>("pick", { kind, suggested: suggested ?? null }),
   takeOpenRequests: () => (isTauri ? call<string[]>("take_open_requests") : Promise.resolve([] as string[])),
 };
+
+export type PickKind = "open" | "save" | "pdf" | "csv" | "image" | "notebook" | "new_notebook";
 
 export interface TemplateInfo {
   id: string;
@@ -83,33 +94,19 @@ export const exportJob = (window as unknown as { __QUIRE_EXPORT__?: { open: stri
 
 /** Open Notebook…: a folder. */
 export async function pickNotebookFolder(): Promise<string | null> {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const p = await open({ title: "Open Notebook", directory: true });
-    return typeof p === "string" ? p : null;
-  }
+  if (isTauri) return api.pick("notebook");
   return window.prompt("Path to a notebook folder");
 }
 
 /** New Notebook…: where to make its folder, and its name. */
 export async function pickNewNotebookPath(): Promise<string | null> {
-  if (isTauri) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    return await save({ title: "New Notebook", defaultPath: "Notebook" });
-  }
+  if (isTauri) return api.pick("new_notebook", "Notebook");
   return window.prompt("Path of the new notebook folder");
 }
 
 export async function pickPdfPath(suggested: string): Promise<string | null> {
-  let p: string | null;
-  if (isTauri) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    p = await save({ defaultPath: suggested, filters: [{ name: "PDF", extensions: ["pdf"] }] });
-  } else {
-    p = suggested;
-  }
-  if (!p) return null;
-  return p.toLowerCase().endsWith(".pdf") ? p : `${p}.pdf`;
+  if (isTauri) return api.pick("pdf", suggested);
+  return suggested.toLowerCase().endsWith(".pdf") ? suggested : `${suggested}.pdf`;
 }
 
 export const isMac = /Mac/.test(navigator.userAgent);
@@ -131,33 +128,13 @@ export function documentPath(p: string): string {
 export const isSmathPath = (p: string) => /\.sm$/i.test(p);
 
 export async function pickOpenPath(): Promise<string | null> {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const extensions = isMac ? ["quire", "quirez"] : ["quirez", "json"];
-    const filters = [
-      { name: "Quire document", extensions },
-      { name: "SMath Studio worksheet", extensions: ["sm"] },
-    ];
-    const p = await open({ title: "Open", filters });
-    return typeof p === "string" ? documentPath(p) : null;
-  }
+  if (isTauri) return api.pick("open");
   return window.prompt("Path to a .quire or .quirez document");
 }
 
 export async function pickSavePath(suggested: string): Promise<string | null> {
-  let p: string | null;
-  if (isTauri) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const filters = isMac
-      ? [
-          { name: "Quire document", extensions: ["quire"] },
-          { name: "Quire single file (for email and other systems)", extensions: ["quirez"] },
-        ]
-      : [{ name: "Quire document", extensions: ["quirez"] }];
-    p = await save({ defaultPath: `${suggested}.${DOC_EXT}`, filters });
-  } else {
-    p = window.prompt("Save as (a path ending in .quire or .quirez)", `${suggested}.${DOC_EXT}`);
-  }
+  if (isTauri) return api.pick("save", `${suggested}.${DOC_EXT}`);
+  const p = window.prompt("Save as (a path ending in .quire or .quirez)", `${suggested}.${DOC_EXT}`);
   if (!p) return null;
   return /\.quirez?$/i.test(p) ? p : `${p}.${DOC_EXT}`;
 }
