@@ -560,7 +560,10 @@ impl<'u> Interp<'u> {
         }
         match builtins::call(name, &vals) {
             Some(r) => r,
-            None => bail!("{name} is not a known function"),
+            None => match crate::special::unsupported(name) {
+                Some(why) => Err(EvalError::new(why)),
+                None => bail!("{name} is not a known function"),
+            },
         }
     }
 
@@ -612,8 +615,25 @@ impl<'u> Interp<'u> {
             }
             ("linfit", _) => Err(EvalError::new("linfit takes 3 arguments: linfit(vx, vy, F)")),
             ("lim", _) => Err(EvalError::new("a limit is symbolic: end the line with → instead of =")),
+            ("IsDefined", 1) => self.is_defined(s, args),
+            ("IsDefined", _) => Err(EvalError::new("IsDefined takes 1 argument: IsDefined(x)")),
             _ => return None,
         })
+    }
+
+    /// `IsDefined(x)`: 1 when the name x has a value here (a variable above, or a constant),
+    /// 0 when it has none or its definition failed. The name itself is not evaluated.
+    fn is_defined(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
+        let name = ident(arg(args, 0)?, "the argument of IsDefined")?;
+        let defined = match s.get(name) {
+            Some(Binding::Val(_)) => true,
+            Some(Binding::Func(_) | Binding::Failed(_)) => false,
+            // in SMath mode a name with no value is a symbol, also when it names a constant
+            None => {
+                matches!(name, "π" | "pi" | "e" | "∞") || (!self.marked_units && constant(name).is_some())
+            }
+        };
+        Ok(Value::bool(defined))
     }
 
     fn if_(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
