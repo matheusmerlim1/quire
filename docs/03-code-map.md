@@ -49,17 +49,18 @@ Saving is the same path in reverse: `api.save` → `quire_service::save`, which 
 
 | Crate | Files | What lives there |
 |---|---|---|
-| `quire-ast` | `lexer.rs`, `parser.rs`, `printer.rs`, `ast.rs` | The linear syntax ([02-file-format.md §4.3](02-file-format.md)). `print(parse(s))` is canonical; parentheses the user typed survive as `Expr::Paren`. Precedence is listed at the top of `parser.rs`. |
+| `quire-ast` | `lexer.rs`, `parser.rs`, `printer.rs`, `ast.rs` | The linear syntax ([02-file-format.md §4.3](02-file-format.md)). `print(parse(s))` is canonical; parentheses the user typed survive as `Expr::Paren`. Precedence is listed at the top of `parser.rs`. Trees deeper than `MAX_DEPTH` (200, as the SMath importer) are refused, so every recursive walk over a parsed tree fits a small stack. |
 | `quire-units` | `db.rs`, `dim.rs`, `rational.rs` | `Dim` (seven SI exponents, rational) and the built-in unit table with factors from NIST SP 811. |
 | `quire-eval` | `value.rs`, `ops.rs` | Values (SI magnitude + dimension, matrices, strings) and arithmetic with dimension checks. |
 | | `interp.rs` | Evaluating one expression in a scope; the lazy constructs (`if`, `for`, `sum`, `int`, `diff`, …) and user functions. |
 | | `builtins.rs`, `stats.rs`, `solvers.rs`, `numeric.rs`, `linalg.rs` | Built-in functions whose arguments are evaluated first; statistics and fitting; ODE solvers, `linfit` and nonlinear `solve`; plain linear algebra; SMath's matrix functions (`col`, `csort`, `tr`, `polyroots`…). |
+| | `budget.rs` | Limits on one evaluation: the step budget (which matrix operations charge too) and the largest matrix. With the nesting limits in `interp.rs` and `symbolic/work.rs`, any document gives an error, never a crash or a hang; its tests try each limit on a 1 MB stack, as in WebAssembly. |
 | | `constants.rs` | Built-in constants and the name-resolution order (your variable, then constant, then unit). |
 | | `worksheet.rs` | Worksheet semantics: definitions in reading order, global `≡`, "defined further down", working units. |
 | | `format.rs` | Result display: rounding, notation, which unit a result is shown in. |
 | | `sheet/` | Spreadsheet tables: `formula.rs` (A1 syntax), `functions.rs` (SUM, IF, VLOOKUP…), `mod.rs` (evaluating a table, named tables as matrices). |
 | | `plot.rs` | Sampling plot series where the plot sits in reading order; SMath systems (`sys`), marker rows and animation frames. |
-| | `symbolic/` | `→`: `mod.rs` (the expression tree and rewriting), `simplify.rs`, `poly.rs` (factoring), `solve.rs`, `integrate.rs`, `limit.rs` (limits and series), `tests.rs`. `bridge.rs`: formulas as values (`Value::Sym`) in SMath documents, where a name with no value is a symbol. |
+| | `symbolic/` | `→`: `mod.rs` (the expression tree and rewriting), `simplify.rs`, `poly.rs` (factoring), `solve.rs`, `integrate.rs`, `limit.rs` (limits and series), `work.rs` (the work budget and depth limits), `tests.rs`. `bridge.rs`: formulas as values (`Value::Sym`) in SMath documents, where a name with no value is a symbol. |
 | `quire-doc` | `lib.rs`, `lenient.rs`, `single.rs` | The document model; unknown keys are kept in `extra` maps. `lenient.rs` reads what it can of values it doesn't expect, keeps them as written, and turns regions it can't read into placeholders (held for the editor on open, put back on save). `.quirez` (one ZIP file) in `single.rs`. |
 | `quire-service` | `lib.rs` | `report`, `open`, `save`, `new_document`, `library` (units and constants for the galleries). |
 | | `canonical.rs` | Canonical `document.json` output: key order and line breaks are fixed, so diffs stay small. |
