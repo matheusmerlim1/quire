@@ -4,6 +4,7 @@ use std::rc::Rc;
 use quire_ast::{BinaryOp, Expr, UnaryOp};
 use quire_units::{Dim, Unit, UnitRegistry};
 
+use crate::budget;
 use crate::builtins::{self, dim_pow};
 use crate::constants::constant;
 use crate::error::{EvalError, Result, bail, internal};
@@ -28,6 +29,18 @@ pub struct Func {
 }
 
 pub type Env = HashMap<String, Binding>;
+
+/// The parameters of a call to `f`, and `f` itself (so it can call itself). Out of line: this
+/// is on the stack once per call of a recursion, and the map's code would make that frame big.
+#[inline(never)]
+fn call_frame(f: &Rc<Func>, vals: Vec<Value>) -> HashMap<String, Binding> {
+    let mut frame = HashMap::new();
+    frame.insert(func_key(&f.name, f.params.len()), Binding::Func(Rc::clone(f)));
+    for (p, v) in f.params.iter().zip(vals) {
+        frame.insert(p.clone(), Binding::Val(v));
+    }
+    frame
+}
 
 /// Functions are keyed by name and arity, so `f(x)` and `f(x, y)` can coexist.
 pub fn func_key(name: &str, arity: usize) -> String {
@@ -89,13 +102,31 @@ impl<'e> Scope<'e> {
     }
 }
 
+/// Deepest chain of user-function calls (`g(n) := … g(n - 1)`).
 const MAX_DEPTH: usize = 256;
-const MAX_STEPS: u64 = 20_000_000;
+/// Deepest nesting of [`Interp::eval`]: a parsed expression is at most
+/// [`quire_ast::MAX_DEPTH`] deep, but function bodies stack up when functions call each other.
+/// This keeps evaluation within a 1 MB stack (the web version's).
+const MAX_NESTING: usize = 1000;
+
+#[cold]
+#[inline(never)]
+fn too_deep() -> EvalError {
+    EvalError::new(format!(
+        "the calculation nests too deeply (more than {MAX_NESTING} levels of calls and operators)"
+    ))
+}
+
+fn placeholder() -> EvalError {
+    EvalError::new("the expression is incomplete: fill in the empty placeholder (?)")
+}
 
 pub struct Interp<'u> {
     pub units: &'u UnitRegistry,
     depth: usize,
-    steps: u64,
+    nesting: usize,
+    /// The step limit of this interpreter, on the thread's count (see [`budget`]).
+    limit: u64,
     /// Plain names that resolved to units (`2 m`): the editor colours them as units.
     pub unit_idents: BTreeSet<String>,
     /// Plain names that resolved to built-in constants (`g`, `c`, `R`).
@@ -116,6 +147,22 @@ fn quantity_like(e: &Expr) -> bool {
         Expr::Binary(BinaryOp::Mul | BinaryOp::Div, l, _) => quantity_like(l),
         _ => false,
     }
+}
+
+// Kept out of line, as `number` below: what a recursive frame inlines makes every level bigger.
+#[inline(never)]
+fn apply_unary(op: UnaryOp, v: Value) -> Result<Value> {
+    match op {
+        UnaryOp::Neg => ops::negate(&v),
+        UnaryOp::Pos => Ok(v),
+        UnaryOp::Not => Ok(Value::bool(!v.truthy()?)),
+        UnaryOp::PlusMinus => bail!("± gives two results; this is not supported yet"),
+    }
+}
+
+#[inline(never)]
+fn number(t: &str) -> Result<Value> {
+    parse_num(t).map(Value::num)
 }
 
 fn parse_num(t: &str) -> Result<f64> {
@@ -158,7 +205,8 @@ impl<'u> Interp<'u> {
         Interp {
             units,
             depth: 0,
-            steps: 0,
+            nesting: 0,
+            limit: budget::limit_from_now(),
             unit_idents: BTreeSet::new(),
             constant_idents: BTreeSet::new(),
             shadowing: BTreeSet::new(),
@@ -179,11 +227,7 @@ impl<'u> Interp<'u> {
     }
 
     pub(crate) fn tick(&mut self) -> Result<()> {
-        self.steps += 1;
-        if self.steps > MAX_STEPS {
-            bail!("evaluation stopped after {MAX_STEPS} steps (endless loop?)");
-        }
-        Ok(())
+        budget::tick(1, self.limit)
     }
 
     pub fn unit(&self, name: &str) -> Result<Unit> {
@@ -191,83 +235,132 @@ impl<'u> Interp<'u> {
     }
 
     pub fn eval(&mut self, s: &mut Scope, e: &Expr) -> Result<Value> {
-        match e {
-            Expr::Num(t) => Ok(Value::num(parse_num(t)?)),
-            Expr::Ident(name) => self.lookup(s, name),
-            Expr::Unit(name) => {
-                let u = self.unit(name)?;
-                Ok(Value::Num(Quantity::new(u.factor, u.dim)))
-            }
-            Expr::Str(t) => Ok(Value::Str(t.clone())),
-            Expr::Placeholder => {
-                bail!("the expression is incomplete: fill in the empty placeholder (?)")
-            }
-            Expr::Paren(x) => self.eval(s, x),
-            Expr::Unary(op, x) => {
-                // `-5 '°C` is five degrees below zero on the scale, not minus 278.15 K
-                if *op == UnaryOp::Neg
-                    && let Expr::Binary(times, a, b) = &**x
-                    && let Some(u) = self.offset_unit(s, *times, b)?
-                {
-                    let v = ops::negate(&self.eval(s, a)?)?;
-                    return on_scale(v, u);
-                }
-                let v = self.eval(s, x)?;
-                match op {
-                    UnaryOp::Neg => ops::negate(&v),
-                    UnaryOp::Pos => Ok(v),
-                    UnaryOp::Not => Ok(Value::bool(!v.truthy()?)),
-                    UnaryOp::PlusMinus => bail!("± gives two results; this is not supported yet"),
-                }
-            }
-            Expr::Factorial(x) => {
-                let n = self.eval(s, x)?.as_int("the argument of !")?;
-                if !(0..=170).contains(&n) {
-                    bail!("{n}! is out of range");
-                }
-                Ok(Value::num((1..=n).map(|k| k as f64).product()))
-            }
-            Expr::Binary(op, a, b) => self.binary(s, *op, a, b),
-            Expr::Compare(first, rest) => {
-                let mut left = self.eval(s, first)?;
-                let mut holds = true;
-                for (op, x) in rest {
-                    let right = self.eval(s, x)?;
-                    holds &= compare(*op, &left, &right)?;
-                    left = right;
-                }
-                Ok(Value::bool(holds))
-            }
-            Expr::Call(name, args) => self.call(s, name, args),
-            Expr::Index(base, idx) => {
-                let b = self.eval(s, base)?;
-                let ix = idx.iter().map(|i| self.eval(s, i)).collect::<Result<Vec<_>>>()?;
-                // a formula with an index is a formula: x[2] for x with no value
-                if matches!(b, Value::Sym(_)) {
-                    return crate::symbolic::bridge::element(base, &ix);
-                }
-                builtins::index(&b, &ix)
-            }
-            Expr::Matrix(rows) => {
-                let cols = rows.first().map_or(0, |r| r.len());
-                let mut data = Vec::with_capacity(rows.len() * cols);
-                for cell in rows.iter().flatten() {
-                    data.push(self.eval(s, cell)?);
-                }
-                Ok(Value::Matrix(Matrix::new(rows.len(), cols, data)))
-            }
-            Expr::Range(start, end) => {
-                let a = self.eval(s, start)?.as_num("the range start")?;
-                let b = self.eval(s, end)?.as_num("the range end")?;
-                let step = self.range_step(s, start, end, a, b)?;
-                builtins::range(a, b, step)
-            }
-            Expr::Define { lhs, rhs, .. } => {
-                let v = self.eval(s, rhs)?;
-                self.assign_local(s, lhs, v.clone())?;
-                Ok(v)
-            }
+        // Every walk down the tree and every call passes here, so this bounds the stack the
+        // evaluation can use. The arms call out to keep this frame small, as it is on the
+        // stack once per level; the helpers on that path are `#[inline(never)]` so the
+        // optimiser doesn't fold their locals back into it.
+        if self.nesting >= MAX_NESTING {
+            return Err(too_deep());
         }
+        if self.nesting == 0 {
+            // the matrix code charges its work against this interpreter's limit
+            let limit = self.limit;
+            return budget::within(limit, || {
+                self.nesting += 1;
+                let r = self.eval(s, e);
+                self.nesting -= 1;
+                r
+            });
+        }
+        self.nesting += 1;
+        let r = match e {
+            Expr::Num(t) => number(t),
+            Expr::Ident(name) => self.lookup(s, name),
+            Expr::Unit(name) => self.unit_value(name),
+            Expr::Str(t) => Ok(Value::Str(t.clone())),
+            Expr::Placeholder => Err(placeholder()),
+            Expr::Paren(x) => self.eval(s, x),
+            Expr::Unary(op, x) => self.unary(s, *op, x),
+            Expr::Factorial(x) => self.factorial(s, x),
+            Expr::Binary(op, a, b) => self.binary(s, *op, a, b),
+            Expr::Compare(first, rest) => self.compare_chain(s, first, rest),
+            Expr::Call(name, args) => self.call(s, name, args),
+            Expr::Index(base, idx) => self.element(s, base, idx),
+            Expr::Matrix(rows) => self.matrix(s, rows),
+            Expr::Range(start, end) => self.range(s, start, end),
+            Expr::Define { lhs, rhs, .. } => self.define_local(s, lhs, rhs),
+        };
+        self.nesting -= 1;
+        r
+    }
+
+    #[inline(never)]
+    fn unit_value(&self, name: &str) -> Result<Value> {
+        let u = self.unit(name)?;
+        Ok(Value::Num(Quantity::new(u.factor, u.dim)))
+    }
+
+    #[inline(never)]
+    fn unary(&mut self, s: &mut Scope, op: UnaryOp, x: &Expr) -> Result<Value> {
+        if op == UnaryOp::Neg
+            && let Some(v) = self.below_zero(s, x)?
+        {
+            return Ok(v);
+        }
+        let v = self.eval(s, x)?;
+        apply_unary(op, v)
+    }
+
+    /// `-5 '°C` is five degrees below zero on the scale, not minus 278.15 K. `None` when `x`
+    /// is not a value on a temperature scale.
+    #[inline(never)]
+    fn below_zero(&mut self, s: &mut Scope, x: &Expr) -> Result<Option<Value>> {
+        let Expr::Binary(times, a, b) = x else { return Ok(None) };
+        let Some(u) = self.offset_unit(s, *times, b)? else { return Ok(None) };
+        let v = ops::negate(&self.eval(s, a)?)?;
+        on_scale(v, u).map(Some)
+    }
+
+    #[inline(never)]
+    fn factorial(&mut self, s: &mut Scope, x: &Expr) -> Result<Value> {
+        let n = self.eval(s, x)?.as_int("the argument of !")?;
+        if !(0..=170).contains(&n) {
+            bail!("{n}! is out of range");
+        }
+        Ok(Value::num((1..=n).map(|k| k as f64).product()))
+    }
+
+    #[inline(never)]
+    fn compare_chain(
+        &mut self,
+        s: &mut Scope,
+        first: &Expr,
+        rest: &[(quire_ast::CmpOp, Expr)],
+    ) -> Result<Value> {
+        let mut left = self.eval(s, first)?;
+        let mut holds = true;
+        for (op, x) in rest {
+            let right = self.eval(s, x)?;
+            holds &= compare(*op, &left, &right)?;
+            left = right;
+        }
+        Ok(Value::bool(holds))
+    }
+
+    #[inline(never)]
+    fn element(&mut self, s: &mut Scope, base: &Expr, idx: &[Expr]) -> Result<Value> {
+        let b = self.eval(s, base)?;
+        let ix = idx.iter().map(|i| self.eval(s, i)).collect::<Result<Vec<_>>>()?;
+        // a formula with an index is a formula: x[2] for x with no value
+        if matches!(b, Value::Sym(_)) {
+            return crate::symbolic::bridge::element(base, &ix);
+        }
+        builtins::index(&b, &ix)
+    }
+
+    #[inline(never)]
+    fn matrix(&mut self, s: &mut Scope, rows: &[Vec<Expr>]) -> Result<Value> {
+        let cols = rows.first().map_or(0, |r| r.len());
+        let mut data = Vec::with_capacity(rows.len() * cols);
+        for cell in rows.iter().flatten() {
+            data.push(self.eval(s, cell)?);
+        }
+        Ok(Value::Matrix(Matrix::new(rows.len(), cols, data)))
+    }
+
+    #[inline(never)]
+    fn range(&mut self, s: &mut Scope, start: &Expr, end: &Expr) -> Result<Value> {
+        let a = self.eval(s, start)?.as_num("the range start")?;
+        let b = self.eval(s, end)?.as_num("the range end")?;
+        let step = self.range_step(s, start, end, a, b)?;
+        builtins::range(a, b, step)
+    }
+
+    #[inline(never)]
+    fn define_local(&mut self, s: &mut Scope, lhs: &Expr, rhs: &Expr) -> Result<Value> {
+        let v = self.eval(s, rhs)?;
+        self.assign_local(s, lhs, v.clone())?;
+        Ok(v)
     }
 
     /// Assignment inside an expression (program blocks, loops): writes the innermost frame.
@@ -289,6 +382,7 @@ impl<'u> Interp<'u> {
         Ok(())
     }
 
+    #[inline(never)]
     fn binary(&mut self, s: &mut Scope, op: BinaryOp, a: &Expr, b: &Expr) -> Result<Value> {
         match op {
             BinaryOp::And => {
@@ -321,6 +415,7 @@ impl<'u> Interp<'u> {
     /// `0 'mm..10 'mm` steps by 1 mm. `None` (the range then asks for a step) when no unit is
     /// written on either end, as in `a..b` for two lengths; an error when the ends are written
     /// in different units.
+    #[inline(never)]
     fn range_step(
         &mut self,
         s: &mut Scope,
@@ -384,6 +479,7 @@ impl<'u> Interp<'u> {
     /// The temperature scale (°C, °F: a unit with an offset) that `b` names when a value is
     /// multiplied by it, as in `20 '°C` or `T*degC`. A plain name counts only where it would be
     /// read as a unit.
+    #[inline(never)]
     fn offset_unit(&mut self, s: &Scope, op: BinaryOp, b: &Expr) -> Result<Option<Unit>> {
         if !matches!(op, BinaryOp::Juxt | BinaryOp::Mul) {
             return Ok(None);
@@ -425,18 +521,13 @@ impl<'u> Interp<'u> {
         }
     }
 
+    #[inline(never)]
     fn call(&mut self, s: &mut Scope, name: &str, args: &[Expr]) -> Result<Value> {
         self.tick()?;
         match s.get(&func_key(name, args.len())) {
             Some(Binding::Func(f)) => {
                 let f = Rc::clone(f);
-                let vals = args.iter().map(|a| self.eval(s, a)).collect::<Result<Vec<_>>>()?;
-                // SMath mode: the body sees the worksheet as it is now, not as it was when the
-                // function was defined (a constant defined further down is still its value)
-                if self.marked_units {
-                    return self.apply_in(&f, vals, s.base);
-                }
-                return self.apply(&f, vals);
+                return self.call_user(s, &f, args);
             }
             Some(Binding::Failed(_)) => {
                 bail!("{name}(…) has no value (its definition has an error)")
@@ -446,6 +537,23 @@ impl<'u> Interp<'u> {
         if let Some(r) = self.lazy(s, name, args) {
             return r;
         }
+        self.call_builtin(s, name, args)
+    }
+
+    /// One of the document's functions, with its arguments worked out.
+    fn call_user(&mut self, s: &mut Scope, f: &Rc<Func>, args: &[Expr]) -> Result<Value> {
+        let vals = args.iter().map(|a| self.eval(s, a)).collect::<Result<Vec<_>>>()?;
+        // SMath mode: the body sees the worksheet as it is now, not as it was when the
+        // function was defined (a constant defined further down is still its value)
+        if self.marked_units {
+            return self.apply_in(f, vals, s.base);
+        }
+        self.apply(f, vals)
+    }
+
+    // Kept out of `call`, whose frame is on the stack for every call a recursion makes.
+    #[inline(never)]
+    fn call_builtin(&mut self, s: &mut Scope, name: &str, args: &[Expr]) -> Result<Value> {
         let vals = args.iter().map(|a| self.eval(s, a)).collect::<Result<Vec<_>>>()?;
         if let Some(r) = crate::symbolic::bridge::call(name, &vals) {
             return r;
@@ -466,11 +574,7 @@ impl<'u> Interp<'u> {
         if self.depth >= MAX_DEPTH {
             bail!("{} calls itself too deeply", f.name);
         }
-        let mut frame = HashMap::new();
-        frame.insert(func_key(&f.name, f.params.len()), Binding::Func(Rc::clone(f)));
-        for (p, v) in f.params.iter().zip(vals) {
-            frame.insert(p.clone(), Binding::Val(v));
-        }
+        let frame = call_frame(f, vals);
         let base = if self.marked_units { base } else { &*f.env };
         let mut scope = Scope { base, frames: vec![frame] };
         self.depth += 1;
@@ -480,6 +584,9 @@ impl<'u> Interp<'u> {
     }
 
     /// Constructs that control evaluation of their own arguments. `None` = not lazy.
+    /// `if` and `block` recurse through here, so the larger constructs are kept out of line
+    /// (`#[inline(never)]`) to keep this frame small.
+    #[inline(never)]
     fn lazy(&mut self, s: &mut Scope, name: &str, args: &[Expr]) -> Option<Result<Value>> {
         Some(match (name, args.len()) {
             ("if", 3) => self.if_(s, args),
@@ -514,6 +621,7 @@ impl<'u> Interp<'u> {
         self.eval(s, arg(args, if c { 1 } else { 2 })?)
     }
 
+    #[inline(never)]
     fn block(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let mut last = Value::num(0.0);
         for a in args {
@@ -522,6 +630,7 @@ impl<'u> Interp<'u> {
         Ok(last)
     }
 
+    #[inline(never)]
     fn for_in(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let var = ident(arg(args, 0)?, "the loop variable")?;
         let items = match self.eval(s, arg(args, 1)?)? {
@@ -537,6 +646,7 @@ impl<'u> Interp<'u> {
         Ok(last)
     }
 
+    #[inline(never)]
     fn for_c(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         self.eval(s, arg(args, 0)?)?;
         let mut last = Value::num(0.0);
@@ -548,6 +658,7 @@ impl<'u> Interp<'u> {
         Ok(last)
     }
 
+    #[inline(never)]
     fn while_(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let mut last = Value::num(0.0);
         while self.eval(s, arg(args, 0)?)?.truthy()? {
@@ -558,6 +669,7 @@ impl<'u> Interp<'u> {
     }
 
     /// `sum(expr, i, a, b)` / `prod(expr, i, a, b)` over whole numbers a..b.
+    #[inline(never)]
     fn fold(&mut self, s: &mut Scope, args: &[Expr], op: BinaryOp) -> Result<Value> {
         let var = ident(arg(args, 1)?, "the summation variable")?;
         let a = self.eval(s, arg(args, 2)?)?.as_int("the lower limit")?;
@@ -605,6 +717,7 @@ impl<'u> Interp<'u> {
     }
 
     /// Adaptive Simpson quadrature of `int(f, x, a, b)`.
+    #[inline(never)]
     fn integrate(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let var = ident(arg(args, 1)?, "the integration variable")?;
         let mut a = self.eval(s, arg(args, 2)?)?.as_num("the lower limit")?;
@@ -633,7 +746,7 @@ impl<'u> Interp<'u> {
         })();
         s.restore(var, prev);
         let v = r?;
-        Ok(Value::Num(Quantity::new(v, fdim.unwrap_or(Dim::NONE) * a.dim)))
+        Ok(Value::Num(Quantity::new(v, builtins::dim_mul(fdim.unwrap_or(Dim::NONE), a.dim)?)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -678,6 +791,7 @@ impl<'u> Interp<'u> {
 
     /// `root(f(x), x, a, b)` / `solve(x^2 == 2, x, a, b)`: a root between a and b.
     /// Without a sign change at the ends, the range is scanned for one.
+    #[inline(never)]
     fn solve_in(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let var = ident(arg(args, 1)?, "the unknown")?;
         let a = self.eval(s, arg(args, 2)?)?.as_num("the lower limit")?;
@@ -771,6 +885,7 @@ impl<'u> Interp<'u> {
 
     /// `solve(f(x), x)`: a root near the current value of x (secant steps), or near a
     /// starting value given as `solve(f(x), x, x0)`.
+    #[inline(never)]
     fn solve_from(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let var = ident(arg(args, 1)?, "the unknown")?;
         let x0 = match (args.get(2), s.get(var)) {
@@ -811,6 +926,7 @@ impl<'u> Interp<'u> {
 
     /// `diff(f, x[, n])`: a numeric derivative at the current value of x, or in SMath mode,
     /// with x unbound, the derivative as a formula.
+    #[inline(never)]
     fn differentiate(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let order = match args.get(2) {
             Some(n) => self.eval(s, n)?.as_int("the derivative order")?,
@@ -871,7 +987,10 @@ impl<'u> Interp<'u> {
         })();
         s.restore(var, prev);
         let v = r?;
-        Ok(Value::Num(Quantity::new(v, fdim.unwrap_or(Dim::NONE) / dim_pow(x0.dim, order as i32))))
+        Ok(Value::Num(Quantity::new(
+            v,
+            builtins::dim_div(fdim.unwrap_or(Dim::NONE), dim_pow(x0.dim, order as i32)?)?,
+        )))
     }
 
     /// A derivative of order above two at a point: worked out as a formula, then evaluated
@@ -925,6 +1044,7 @@ impl<'u> Interp<'u> {
 impl Interp<'_> {
     /// Variables first, then constants, then units: a plain `m` means metres unless
     /// a variable `m` is defined at this point (Mathcad's rule).
+    #[inline(never)]
     fn lookup(&mut self, s: &Scope, name: &str) -> Result<Value> {
         match s.get(name) {
             Some(Binding::Val(v)) => {
@@ -960,9 +1080,6 @@ impl Interp<'_> {
     }
 }
 
-/// Largest matrix an element assignment may grow (`M[1000, 1000] := x` is fine).
-const MAX_ELEMENTS: usize = 1_000_000;
-
 /// `v[i] := x` / `M[i, j] := x`, growing the matrix (filled with 0) as needed.
 pub fn set_element(current: Option<Value>, idx: &[i64], v: Value) -> Result<Value> {
     let (r, c) = match *idx {
@@ -981,9 +1098,8 @@ pub fn set_element(current: Option<Value>, idx: &[i64], v: Value) -> Result<Valu
     };
     if r > m.rows || c > m.cols {
         let (rows, cols) = (r.max(m.rows), c.max(m.cols));
-        if rows.checked_mul(cols).is_none_or(|n| n > MAX_ELEMENTS) {
-            bail!("a {rows}×{cols} matrix is too large (at most {MAX_ELEMENTS} elements)");
-        }
+        // `M[1000, 1000] := x` is fine
+        budget::check_size(rows, cols)?;
         if cols == m.cols || m.rows == 0 {
             // new rows only: append (amortized, so filling a column in a loop stays linear)
             let mut data = std::mem::take(&mut m.data);

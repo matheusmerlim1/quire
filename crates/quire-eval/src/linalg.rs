@@ -5,7 +5,7 @@
 use std::ops::{Add, Div, Mul, Sub};
 
 use quire_ast::BinaryOp;
-use quire_units::{Dim, Rational};
+use quire_units::Dim;
 
 use crate::builtins::column;
 use crate::error::{EvalError, Result, bail};
@@ -152,9 +152,10 @@ fn polyroots(args: &[Value]) -> Result<Value> {
     let mut roots = vec![0.0; low];
     let mut unit = Dim::NONE;
     if let (Some(p0), Some(p1)) = (p.first(), p.get(1)) {
-        unit = p0.dim / p1.dim;
+        unit = crate::builtins::dim_div(p0.dim, p1.dim)?;
         for (k, q) in p.iter().enumerate() {
-            if q.dim != p0.dim * unit.pow(Rational::int(-(k as i32))) {
+            let want = crate::builtins::dim_mul(p0.dim, crate::builtins::dim_pow(unit, -(k as i32))?)?;
+            if q.dim != want {
                 bail!("polyroots needs coefficients whose units fit one polynomial in x");
             }
         }

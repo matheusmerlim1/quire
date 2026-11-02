@@ -126,7 +126,7 @@ impl Interp<'_> {
             );
         }
         for (j, (q, d)) in r.iter().zip(&ode.dims).enumerate() {
-            let want = *d / ode.tdim;
+            let want = crate::builtins::dim_div(*d, ode.tdim)?;
             if !fits(*q, want) {
                 let which = if y.len() == 1 { String::new() } else { format!(" (element {})", j + 1) };
                 bail!(
@@ -154,6 +154,7 @@ impl Interp<'_> {
     }
 
     /// `rkfixed(y0, t0, t1, n, D)`: n classical Runge–Kutta steps from t0 to t1.
+    #[inline(never)]
     pub(crate) fn rkfixed(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let (ode, mut y, t0, t1, n) = self.ode_problem(s, args, "rkfixed")?;
         let h = (t1 - t0) / n as f64;
@@ -177,6 +178,7 @@ impl Interp<'_> {
 
     /// `Rkadapt(y0, t0, t1, n, D)`: the same table as `rkfixed`, but each of the n intervals
     /// is crossed in as many Dormand–Prince 5(4) steps as an accuracy of about 1e-9 needs.
+    #[inline(never)]
     pub(crate) fn rkadapt(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         const C: [f64; 6] = [1.0 / 5.0, 3.0 / 10.0, 4.0 / 5.0, 8.0 / 9.0, 1.0, 1.0];
         const A: [&[f64]; 6] = [
@@ -261,6 +263,7 @@ impl Interp<'_> {
 
     /// `linfit(vx, vy, F)`: the coefficients c minimising Σ(vy − c·F(vx))², where F(x)
     /// returns the vector of basis functions (Mathcad's linfit).
+    #[inline(never)]
     pub(crate) fn linfit(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let xs = quantities(&self.eval(s, arg(args, 0)?)?, "vx")?;
         let ys = quantities(&self.eval(s, arg(args, 1)?)?, "vy")?;
@@ -298,10 +301,15 @@ impl Interp<'_> {
         if m == 0 || xs.len() < m {
             bail!("linfit needs at least as many points ({}) as basis functions ({m})", xs.len());
         }
+        crate::budget::charge(crate::budget::least_squares_work(xs.len(), m), 64)?;
         let Some(c) = numeric::least_squares(a, ys.iter().map(|q| q.v).collect(), m) else {
             bail!("linfit: the functions in {}(x) are not independent at these x values", f.name)
         };
-        let data = c.iter().zip(&dims).map(|(c, d)| Value::Num(Quantity::new(*c, ydim / *d))).collect();
+        let data = c
+            .iter()
+            .zip(&dims)
+            .map(|(c, d)| Ok(Value::Num(Quantity::new(*c, crate::builtins::dim_div(ydim, *d)?))))
+            .collect::<Result<_>>()?;
         Ok(Value::Matrix(Matrix::column(data)))
     }
 }
@@ -327,6 +335,7 @@ impl Interp<'_> {
 
     /// `solve([f1 == g1; f2 == g2], [x; y])`: the x, y that satisfy every equation, found by
     /// damped Newton steps from their current values (or from `solve(…, [x; y], [x0; y0])`).
+    #[inline(never)]
     pub(crate) fn solve_system(&mut self, s: &mut Scope, args: &[Expr]) -> Result<Value> {
         let unknowns = match arg(args, 1)? {
             Expr::Matrix(rows) => {
@@ -484,6 +493,7 @@ impl Interp<'_> {
             if phi.sqrt() <= 1e-13 {
                 return Ok(x);
             }
+            crate::budget::charge((n as u64).saturating_pow(3), 64)?;
             let Some(dx) = numeric::solve(jac, f.iter().map(|v| -v).collect()) else {
                 bail!(
                     "the equations don't determine the unknowns here (their Jacobian is singular); try other starting values"

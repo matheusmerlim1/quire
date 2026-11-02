@@ -34,7 +34,12 @@ pub(crate) fn simplify(e: &S) -> S {
 
 /// How long the expression reads, as it would be shown.
 fn measure(e: &S) -> usize {
-    let text = print(&to_expr(&tidy(e)));
+    let e = tidy(e);
+    // too deep to print: never the shortest form
+    if work::shown_depth(&e) > work::MAX_SHOWN_DEPTH {
+        return usize::MAX;
+    }
+    let text = print(&to_expr(&e));
     // between forms of the same length: (-b - c)/2 over -(b + c)/2, and P*(L - a)/L over
     // P*(1 - a/L), which has a fraction inside brackets
     let mut depth = 0;

@@ -3,7 +3,7 @@
 use quire_ast::{BinaryOp, CmpOp};
 use quire_units::{Dim, Rational};
 
-use crate::error::{Result, bail};
+use crate::error::{EvalError, Result, bail};
 use crate::format::describe_dim;
 use crate::value::{Matrix, Quantity, Value};
 
@@ -45,7 +45,7 @@ pub fn pow(x: Quantity, y: Quantity) -> Result<Quantity> {
         Dim::NONE
     } else {
         match Rational::approx(y.v) {
-            Some(r) => x.dim.pow(r),
+            Some(r) => crate::builtins::dim_pow_r(x.dim, r)?,
             None => bail!("cannot raise {} to the power {}", describe_dim(x.dim), y.v),
         }
     };
@@ -69,13 +69,16 @@ fn num_op(op: BinaryOp, x: Quantity, y: Quantity) -> Result<Quantity> {
             Quantity::new(finite(x.v - y.v, inputs, "this difference")?, x.dim)
         }
         BinaryOp::Mul | BinaryOp::Juxt => {
-            Quantity::new(finite(x.v * y.v, inputs, "this product")?, x.dim * y.dim)
+            Quantity::new(finite(x.v * y.v, inputs, "this product")?, crate::builtins::dim_mul(x.dim, y.dim)?)
         }
         BinaryOp::Div => {
             if y.v == 0.0 {
                 bail!("division by zero");
             }
-            Quantity::new(finite(x.v / y.v, inputs, "this quotient")?, x.dim / y.dim)
+            Quantity::new(
+                finite(x.v / y.v, inputs, "this quotient")?,
+                crate::builtins::dim_div(x.dim, y.dim)?,
+            )
         }
         BinaryOp::Mod => {
             same_dim(x.dim, y.dim, "take the remainder of")?;
@@ -186,6 +189,10 @@ fn mat_mul(m: &Matrix, n: &Matrix) -> Result<Matrix> {
     if m.cols != n.rows {
         bail!("cannot multiply a {}×{} matrix by a {}×{} matrix", m.rows, m.cols, n.rows, n.cols);
     }
+    crate::budget::check_size(m.rows, n.cols)?;
+    // element arithmetic is slow next to plain floats: a step per few multiply-adds
+    let work = (m.rows as u64).saturating_mul(n.cols as u64).saturating_mul(m.cols as u64);
+    crate::budget::charge(work, 8)?;
     let mut data = Vec::with_capacity(m.rows * n.cols);
     for i in 0..m.rows {
         for j in 0..n.cols {
@@ -232,6 +239,8 @@ fn lu(m: &Matrix, want_inverse: bool) -> Result<(f64, Option<Vec<f64>>, Dim)> {
         bail!("the matrix must be square, but is {}×{}", m.rows, m.cols);
     }
     let n = m.rows;
+    // Gauss-Jordan on floats: about n³ multiply-adds for the matrix and as many for the inverse
+    crate::budget::charge((n as u64).saturating_pow(3).saturating_mul(2), 64)?;
     let (mut a, dim) = uniform(m, "a matrix element")?;
     if a.len() != n * n {
         bail!("the matrix has {} elements, but a {n}×{n} matrix needs {}", a.len(), n * n);
@@ -287,7 +296,8 @@ pub fn det(m: &Matrix) -> Result<Value> {
         return det_by_cofactors(m);
     }
     let (d, _, dim) = lu(m, false)?;
-    Ok(Value::Num(Quantity::new(d, dim.pow(Rational::int(m.rows as i32)))))
+    let rows = i32::try_from(m.rows).map_err(|_| EvalError::new("the matrix is too large"))?;
+    Ok(Value::Num(Quantity::new(d, crate::builtins::dim_pow(dim, rows)?)))
 }
 
 /// The determinant of a matrix holding formulas, by expansion along the first row. Elimination
@@ -333,7 +343,7 @@ pub fn inverse(m: &Matrix) -> Result<Value> {
 fn inverse_of(m: &Matrix) -> Result<Matrix> {
     let (_, inv, dim) = lu(m, true)?;
     let Some(inv) = inv else { bail!("the matrix is singular") };
-    let inv_dim = Dim::NONE / dim;
+    let inv_dim = crate::builtins::dim_div(Dim::NONE, dim)?;
     let data = inv.into_iter().map(|v| Value::Num(Quantity::new(v, inv_dim))).collect();
     Ok(Matrix::new(m.rows, m.cols, data))
 }
@@ -482,11 +492,11 @@ mod tests {
         let Value::Matrix(inv) = power(&a, -1.0)? else { return Err("not a matrix".into()) };
         for e in &inv.data {
             let Value::Num(q) = e else { return Err("not a number".into()) };
-            assert_eq!(q.dim, Dim::NONE / length);
+            assert_eq!(Some(q.dim), Dim::NONE.checked_div(length));
         }
         let Value::Matrix(sq) = power(&a, 2.0)? else { return Err("not a matrix".into()) };
         let Some(Value::Num(q)) = sq.get(0, 0) else { return Err("not a number".into()) };
-        assert_eq!(q.dim, length.pow(Rational::int(2)));
+        assert_eq!(Some(q.dim), length.pow(Rational::int(2)));
         Ok(())
     }
 
