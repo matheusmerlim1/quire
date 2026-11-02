@@ -1,12 +1,13 @@
 # Workflows pin every third-party action by commit; Dependabot proposes the new commit (and
-# the version comment) when an action releases. Rust and npm dependencies are grouped so a
-# week's routine updates arrive as one pull request per ecosystem.
+# the version comment) when an action releases. Once a month, at most one pull request per
+# ecosystem: every update is grouped, major versions included, so crates that must move
+# together (sha1 and sha2 share the digest traits) arrive in the same pull request.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         patterns: ["*"]
@@ -14,15 +15,15 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
-      cargo-minor:
-        update-types: [minor, patch]
+      cargo:
+        patterns: ["*"]
 
   - package-ecosystem: npm
     directory: /app
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
-      npm-minor:
-        update-types: [minor, patch]
+      npm:
+        patterns: ["*"]
