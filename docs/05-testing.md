@@ -48,6 +48,7 @@ CI runs the PDF test on Linux only. When you change printing, `export.ts`, `prin
 A test that fails sometimes is a bug, in the test or in the app. Reproduce it with `--repeat-each 20` before changing anything. Known causes so far:
 
 - typing before a field has focus (wait for `toBeFocused()` first, as the `name()` helper in `notebook.spec.ts` does);
+- checking results, or a copy that carries them, before the evaluation of the last edit is in (wait for what the engine renders, as the clipboard tests wait for the text's paragraph; a copy made before then carries what was typed, without results);
 - measuring colours mid-animation (the axe tests emulate `reducedMotion: "reduce"`);
 - CI's Linux WebKit reporting text colours mid-update right after a document opens (the `audit()` helper in `e2e/axe.ts` re-measures before failing, so only problems that persist fail).
 

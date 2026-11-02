@@ -112,6 +112,30 @@ test("a word followed by a space becomes text", async ({ page }) => {
   await expect(regions(page).first()).toContainText("The span is simply supported.");
 });
 
+test("nothing typed right after a region starts is lost, with results slow to come", async ({ page }) => {
+  // a busy machine: each evaluation answers late, so typing runs ahead of the results
+  await page.route("**/api/report", async (route) => {
+    await new Promise((r) => setTimeout(r, 150));
+    await route.continue().catch(() => {});
+  });
+  await blank(page);
+  // math from the page's hidden field, text after a quote mark, and a sentence that
+  // starts as math and turns into text at its first space: typed with no pause
+  await page.keyboard.type("q:=12 kN/m");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type('"Loads on the beam');
+  // in text, Enter is a new paragraph; ⌘Enter goes on below
+  await page.keyboard.press("ControlOrMeta+Enter");
+  await page.keyboard.type("The span is simply supported.");
+  await page.keyboard.press("Escape");
+  await expect(regions(page)).toHaveCount(3);
+  await expect(regions(page).nth(1).locator("p")).toHaveText("Loads on the beam");
+  await expect(regions(page).nth(2).locator("p")).toHaveText("The span is simply supported.");
+  await regions(page).first().click();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("input.math-input")).toHaveValue("q:=12 kN/m");
+});
+
 test("undo and redo a new region", async ({ page }) => {
   await blank(page);
   await typeLines(page, "a:=2", "b:=a*3=");
