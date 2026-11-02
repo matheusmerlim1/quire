@@ -193,9 +193,12 @@ pub fn call(name: &str, args: &[Value]) -> Option<Result<Value>> {
         "cosh" => real(name, f64::cosh, args),
         "tanh" => real(name, f64::tanh, args),
         "coth" => real(name, |x| 1.0 / x.tanh(), args),
+        "sech" => real(name, |x| 1.0 / x.cosh(), args),
+        "csch" => real(name, |x| 1.0 / x.sinh(), args),
         "asinh" => real(name, f64::asinh, args),
         "acosh" => real(name, f64::acosh, args),
         "atanh" => real(name, f64::atanh, args),
+        "acoth" => real(name, |x| (1.0 / x).atanh(), args),
         "atan2" => atan2(args),
         "floor" => real(name, f64::floor, args),
         "ceil" => real(name, f64::ceil, args),
@@ -227,7 +230,11 @@ pub fn call(name: &str, args: &[Value]) -> Option<Result<Value>> {
         "concat" => concat(args),
         "eval" => arity(name, args, |n| n == 1, "1 argument").and_then(|_| Ok(arg(args, 0)?.clone())),
         "sys" => crate::plot::sys(args),
-        _ => return crate::linalg::call(name, args).or_else(|| crate::stats::call(name, args)),
+        _ => {
+            return crate::linalg::call(name, args)
+                .or_else(|| crate::stats::call(name, args))
+                .or_else(|| crate::special::call(name, args));
+        }
     };
     Some(r)
 }

@@ -93,7 +93,7 @@ fn num_op(op: BinaryOp, x: Quantity, y: Quantity) -> Result<Quantity> {
     })
 }
 
-fn map(m: &Matrix, f: impl Fn(&Value) -> Result<Value>) -> Result<Value> {
+pub(crate) fn map(m: &Matrix, f: impl Fn(&Value) -> Result<Value>) -> Result<Value> {
     let data = m.data.iter().map(f).collect::<Result<Vec<_>>>()?;
     Ok(Value::Matrix(Matrix::new(m.rows, m.cols, data)))
 }

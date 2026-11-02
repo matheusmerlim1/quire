@@ -17,6 +17,7 @@ mod ops;
 mod plot;
 mod sheet;
 mod solvers;
+mod special;
 mod stats;
 mod symbolic;
 mod value;
