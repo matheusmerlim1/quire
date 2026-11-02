@@ -816,8 +816,9 @@ export function App() {
       el.scrollTop = 0;
       el.scrollLeft = 0;
     });
-    document.addEventListener("copy", (e) => onCopy(e, false));
-    document.addEventListener("cut", (e) => onCopy(e, true));
+    // right after an edit the results on screen may still be those of the document before it
+    document.addEventListener("copy", (e) => onCopy(e, false, !liveReport.pending()));
+    document.addEventListener("cut", (e) => onCopy(e, true, !liveReport.pending()));
     document.addEventListener("paste", (e) => void onPaste(e));
     // images dropped on the canvas
     window.addEventListener("dragover", (e) => e.preventDefault());
