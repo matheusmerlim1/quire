@@ -65,6 +65,10 @@ const FUNCTIONS: Row[] = [
   ["median, percentile(v, p), var, stdev", "statistics; Var, Stdev (or var.s, stdev.s) for a sample"],
   ["Ceil(x, y), Floor, Round, Trunc", "to a multiple: Ceil(1.23 m, 5 cm) = 1.25 m"],
   ["det, inverse, transpose, identity, rows, cols", "matrices"],
+  ["matrix(r, c), diag(v), submatrix(M, r1, r2, c1, c2)", "building and cutting matrices (indices from 1)"],
+  ["minor, alg, rank, norm1, normi, norme, reverse", "more matrix functions, as in SMath"],
+  ["findrows(M, x, j), strlen, str2num, UnitsOf", "finding rows, strings, units"],
+  ["Gamma, erf, sech, csch, acoth, IsDefined(x)", "special functions and checks"],
   ["mean, sort, norm, dot, cross, length, stack, augment", "vectors"],
 ];
 
