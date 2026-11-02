@@ -64,13 +64,14 @@ pub struct WorkingUnit {
 /// to a power (`m^2`, `cm^4`) or two units (`kN*m`, `kN/m`). Returns (factor, linear text).
 pub fn working_unit(dim: Dim, vocab: &[WorkingUnit]) -> Option<(f64, String)> {
     const POWERS: [i32; 8] = [1, 2, 3, 4, -1, -2, -3, -4];
+    // a power whose exponents don't fit is never the dimension sought
     let pow = |u: &WorkingUnit, k: i32| u.unit.dim.pow(Rational::int(k));
     // ((complexity, preference rank), [(unit index, power)]): lower scores are better
     type Candidate = ((i32, usize), Vec<(usize, i32)>);
     let mut found: Vec<Candidate> = Vec::new();
     for (i, a) in vocab.iter().enumerate() {
         for ka in POWERS {
-            if pow(a, ka) == dim {
+            if pow(a, ka) == Some(dim) {
                 found.push(((ka.abs(), i), vec![(i, ka)]));
             }
         }
@@ -80,7 +81,7 @@ pub fn working_unit(dim: Dim, vocab: &[WorkingUnit]) -> Option<(f64, String)> {
             }
             for ka in POWERS {
                 for kb in POWERS {
-                    if pow(a, ka) * pow(b, kb) == dim {
+                    if pow(a, ka).zip(pow(b, kb)).and_then(|(x, y)| x.checked_mul(y)) == Some(dim) {
                         found.push(((ka.abs() + kb.abs(), i + j), vec![(i, ka), (j, kb)]));
                     }
                 }
@@ -232,7 +233,7 @@ pub(crate) fn si_unit(dim: Dim) -> String {
         let metre = Dim::from_ints([1, 0, 0, 0, 0, 0, 0]);
         for (n, d) in named {
             for k in [1, -1, 2, -2, 3, -3] {
-                if *d * metre.pow(Rational::int(k)) == dim {
+                if metre.pow(Rational::int(k)).and_then(|m| d.checked_mul(m)) == Some(dim) {
                     return format_product(&[(n, Rational::ONE), (BASE_UNITS[0], Rational::int(k))], true);
                 }
             }
@@ -319,7 +320,7 @@ pub fn format_shown(
         let us = parse_unit_spec(u, units)?;
         if us.dim != q.dim && us.offset == 0.0 && !us.text.is_empty() {
             let d = spec.decimals.unwrap_or(settings.decimals);
-            let rest = si_unit(q.dim / us.dim);
+            let rest = si_unit(crate::builtins::dim_div(q.dim, us.dim)?);
             let text = match rest.strip_prefix("1/") {
                 Some(denominator) => format!("{}/{denominator}", us.text),
                 None if rest.is_empty() => us.text.clone(),

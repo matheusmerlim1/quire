@@ -411,6 +411,19 @@ pub(crate) fn reads(t: &TableInput, units: &UnitRegistry) -> Vec<String> {
     out
 }
 
+/// The rows and columns of the range from `a` to `b` that lie inside a table of `size`
+/// (rows, columns). Cells past the table are blank, so `SUM(A2:ZZZ999999)` reads only the
+/// table instead of walking (and allocating) a billion blanks. `None` when nothing is inside.
+fn clip(
+    a: (usize, usize),
+    b: (usize, usize),
+    size: (usize, usize),
+) -> Option<(std::ops::RangeInclusive<usize>, std::ops::RangeInclusive<usize>)> {
+    let (r0, r1) = (a.0.min(b.0), a.0.max(b.0).min(size.0.checked_sub(1)?));
+    let (c0, c1) = (a.1.min(b.1), a.1.max(b.1).min(size.1.checked_sub(1)?));
+    (r0 <= r1 && c0 <= c1).then_some((r0..=r1, c0..=c1))
+}
+
 impl Sheet<'_, '_, '_> {
     fn cell(&mut self, r: usize, c: usize) -> std::result::Result<CV, String> {
         if r >= self.cells.len() || c >= self.cells.first().map_or(0, Vec::len) {
@@ -460,9 +473,9 @@ impl Sheet<'_, '_, '_> {
     }
 
     fn range(&mut self, a: (usize, usize), b: (usize, usize)) -> Result<Vec<Vec<CV>>> {
-        let (r0, r1) = (a.0.min(b.0), a.0.max(b.0));
-        let (c0, c1) = (a.1.min(b.1), a.1.max(b.1));
-        (r0..=r1).map(|r| (c0..=c1).map(|c| self.get(r, c)).collect()).collect()
+        let size = (self.cells.len(), self.cells.first().map_or(0, Vec::len));
+        let Some((rows, cols)) = clip(a, b, size) else { return Ok(Vec::new()) };
+        rows.map(|r| cols.clone().map(|c| self.get(r, c)).collect()).collect()
     }
 
     fn external(&mut self, table: &str, a: (usize, usize), b: Option<(usize, usize)>) -> Result<F> {
@@ -484,9 +497,12 @@ impl Sheet<'_, '_, '_> {
             }
         };
         let b = b.unwrap_or(a);
-        let (r0, r1) = (a.0.min(b.0), a.0.max(b.0));
-        let (c0, c1) = (a.1.min(b.1), a.1.max(b.1));
-        let rows: Vec<Vec<CV>> = (r0..=r1).map(|r| (c0..=c1).map(|c| at(r, c)).collect()).collect();
+        let rows: Vec<Vec<CV>> = match clip(a, b, (m.rows, m.cols)) {
+            Some((rows, cols)) => rows.map(|r| cols.clone().map(|c| at(r, c)).collect()).collect(),
+            // a single cell outside the table reads as blank, as inside it
+            None if a == b => vec![vec![CV::Blank]],
+            None => Vec::new(),
+        };
         Ok(F::Lit(rows))
     }
 

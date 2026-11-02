@@ -4,13 +4,15 @@
 //!
 //! An indexed name such as `x[2]` is one symbol inside the symbolic module (named `x[2]`),
 //! and is turned back into an index expression on the way out. Every formula is simplified
-//! before it is returned, and one larger than [`MAX_NODES`] is an error rather than a hang.
+//! before it is returned, and one larger than [`MAX_NODES`] (or nested deeper than the
+//! parser accepts) is an error rather than a hang. Each call works within a budget
+//! ([`super::work`]), so a formula that explodes stops quickly with an error.
 
 use std::f64::consts::{E, PI};
 
 use quire_ast::{BinaryOp, Expr, UnaryOp, parse, print};
 
-use super::{Ctx, S, add, approx, diff, from_expr, func, mul, neg, pow, subs, to_expr};
+use super::{Ctx, S, add, approx, diff, from_expr, func, mul, neg, pow, subs, to_expr, work};
 use crate::error::{EvalError, Result, bail};
 use crate::value::{Matrix, Value};
 
@@ -67,7 +69,17 @@ pub(crate) fn index_expr(v: &Value) -> Result<Expr> {
 pub(crate) fn element(base: &Expr, ix: &[Value]) -> Result<Value> {
     let Expr::Ident(name) = base else { bail!("only a named formula can be indexed") };
     let idx = ix.iter().map(index_expr).collect::<Result<Vec<_>>>()?;
-    Ok(Value::Sym(Expr::Index(Box::new(Expr::Ident(name.clone())), idx)))
+    bounded(Expr::Index(Box::new(Expr::Ident(name.clone())), idx))
+}
+
+/// A formula as a value. Values are walked recursively (evaluated, printed, put into other
+/// formulas), so they are kept within the depth the parser accepts: `x[x[x[…]]]` built in a
+/// loop stops there.
+fn bounded(e: Expr) -> Result<Value> {
+    if e.depth() > quire_ast::MAX_DEPTH {
+        bail!("the expression grew too large");
+    }
+    Ok(Value::Sym(e))
 }
 
 /// `e` rebuilt bottom-up: where `f` gives a replacement for a node, that replaces the node.
@@ -153,7 +165,9 @@ pub(crate) fn to_s(v: &Value) -> Result<S> {
         Value::Sym(e) => {
             let none = |_: &str, _: usize| -> Option<(Vec<String>, Expr)> { None };
             let mut cx = Ctx::new(&none);
-            from_expr(&mangle(e), &mut cx).map_err(EvalError::new)
+            let s = from_expr(&mangle(e), &mut cx).map_err(EvalError::new)?;
+            check_size(&s)?;
+            Ok(s)
         }
         Value::Matrix(_) => bail!("a matrix cannot be used inside a formula"),
         Value::Str(_) => bail!("text cannot be part of a formula"),
@@ -180,22 +194,18 @@ fn remangle(e: Expr) -> Expr {
     })
 }
 
-/// Refuses a formula that has grown past [`MAX_NODES`].
+/// Refuses a formula that has grown past [`MAX_NODES`] or too deep to walk.
 pub(crate) fn check_size(s: &S) -> Result<()> {
-    let mut budget = MAX_NODES;
-    if within(s, &mut budget) { Ok(()) } else { bail!("the expression grew too large") }
+    let (depth, nodes) = work::measure(s);
+    if nodes > MAX_NODES || depth > work::MAX_DEPTH {
+        bail!("the expression grew too large");
+    }
+    Ok(())
 }
 
-fn within(s: &S, budget: &mut usize) -> bool {
-    if *budget == 0 {
-        return false;
-    }
-    *budget -= 1;
-    match s {
-        S::N(_) | S::Sym(_) | S::Unit(_) => true,
-        S::Add(xs) | S::Mul(xs) | S::Fn(_, xs) | S::Vec(xs) => xs.iter().all(|x| within(x, &mut *budget)),
-        S::Pow(b, p) => within(b, budget) && within(p, budget),
-    }
+/// Symbolic work within a budget: an error, not a hang, when it explodes.
+fn budgeted<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    work::budgeted(|| f().map_err(|e| e.message)).map_err(EvalError::new)
 }
 
 /// A symbolic result as a value: a number when nothing is left unknown, else a formula
@@ -203,6 +213,9 @@ fn within(s: &S, budget: &mut usize) -> bool {
 pub(crate) fn from_s(s: &S) -> Result<Value> {
     check_size(s)?;
     let shown = super::tidy(&super::simplify(s));
+    if work::shown_depth(&shown) > work::MAX_SHOWN_DEPTH {
+        bail!("the expression grew too large");
+    }
     if let Some(x) = approx(&shown, &|_: &str| None).filter(|x| x.is_finite()) {
         return Ok(Value::num(x));
     }
@@ -214,11 +227,15 @@ pub(crate) fn from_s(s: &S) -> Result<Value> {
         }
         _ => to_expr(&shown),
     };
-    Ok(Value::Sym(remangle(e)))
+    bounded(remangle(e))
 }
 
 /// `a op b` where at least one side is a formula.
 pub(crate) fn arith_sym(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
+    budgeted(|| arith_within(op, a, b))
+}
+
+fn arith_within(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
     let (x, y) = (to_s(a)?, to_s(b)?);
     let s = match op {
         BinaryOp::Add => add(vec![x, y]),
@@ -240,17 +257,30 @@ pub(crate) fn arith_sym(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
 /// is not one of these with a formula argument, so the usual builtins take it.
 pub(crate) fn call(name: &str, args: &[Value]) -> Option<Result<Value>> {
     let [a @ Value::Sym(_)] = args else { return None };
-    let s = match to_s(a) {
-        Ok(s) => s,
-        Err(e) => return Some(Err(e)),
-    };
-    let built = match name {
-        "sqrt" => pow(s, S::N(super::Num::rat(1, 2))),
-        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "exp" | "ln"
-        | "abs" => func(name, vec![s]),
-        _ => return None,
-    };
-    Some(from_s(&built))
+    let elementary = matches!(
+        name,
+        "sqrt"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "exp"
+            | "ln"
+            | "abs"
+    );
+    if !elementary {
+        return None;
+    }
+    Some(budgeted(|| {
+        let s = to_s(a)?;
+        let built = if name == "sqrt" { pow(s, S::N(super::Num::rat(1, 2))) } else { func(name, vec![s]) };
+        from_s(&built)
+    }))
 }
 
 /// The derivative of a value with respect to the symbol `var`, `order` times. A matrix is
@@ -261,14 +291,14 @@ pub(crate) fn diff_value(v: &Value, var: &str, order: u32) -> Result<Value> {
             let data = m.data.iter().map(|e| diff_value(e, var, order)).collect::<Result<Vec<_>>>()?;
             Ok(Value::Matrix(Matrix::new(m.rows, m.cols, data)))
         }
-        _ => {
+        _ => budgeted(|| {
             let mut s = to_s(v)?;
             for _ in 0..order {
                 check_size(&s)?;
                 s = diff(&s, var);
             }
             from_s(&s)
-        }
+        }),
     }
 }
 
@@ -279,7 +309,7 @@ pub(crate) fn at_point(v: &Value, var: &str, x: f64) -> Result<Value> {
             let data = m.data.iter().map(|e| at_point(e, var, x)).collect::<Result<Vec<_>>>()?;
             Ok(Value::Matrix(Matrix::new(m.rows, m.cols, data)))
         }
-        _ => from_s(&subs(&to_s(v)?, var, &num_s(x))),
+        _ => budgeted(|| from_s(&subs(&to_s(v)?, var, &num_s(x)))),
     }
 }
 

@@ -23,6 +23,7 @@ mod simplify;
 mod solve;
 #[cfg(test)]
 mod tests;
+mod work;
 
 use integrate::integrate;
 use simplify::{simplify, tidy};
@@ -223,6 +224,10 @@ fn num_of(s: &S) -> Option<Num> {
 impl S {
     /// A canonical text key: equal expressions have equal keys.
     fn key(&self) -> String {
+        // keys are built over and over as terms are collected: the work grows with them
+        if !work::spend(1) {
+            return String::new();
+        }
         match self {
             S::N(Num::Rat(a, 1)) => a.to_string(),
             S::N(Num::Rat(a, b)) => format!("{a}/{b}"),
@@ -238,6 +243,9 @@ impl S {
     }
 
     fn depends(&self, x: &str) -> bool {
+        if !work::spend(1) {
+            return false;
+        }
         match self {
             S::Sym(s) => s == x,
             S::N(_) | S::Unit(_) => false,
@@ -289,6 +297,9 @@ fn base_exp(f: &S) -> (S, S) {
 }
 
 pub(crate) fn add(terms: Vec<S>) -> S {
+    if !work::spend(terms.len()) {
+        return ZERO;
+    }
     let mut flat = Vec::new();
     for t in terms {
         match t {
@@ -301,6 +312,9 @@ pub(crate) fn add(terms: Vec<S>) -> S {
             }
             t => flat.push(t),
         }
+    }
+    if work::too_many(flat.len()) {
+        return ZERO;
     }
     let mut constant = Num::int(0);
     // like terms: rest key → (rest, summed coefficient), in order of first appearance
@@ -396,12 +410,18 @@ fn term_order(a: &S, b: &S) -> std::cmp::Ordering {
 }
 
 pub(crate) fn mul(factors: Vec<S>) -> S {
+    if !work::spend(factors.len()) {
+        return ZERO;
+    }
     let mut flat = Vec::new();
     for f in factors {
         match f {
             S::Mul(fs) => flat.extend(fs),
             f => flat.push(f),
         }
+    }
+    if work::too_many(flat.len()) {
+        return ZERO;
     }
     let mut c = Num::int(1);
     let mut order: Vec<String> = Vec::new();
@@ -462,6 +482,9 @@ pub(crate) fn mul(factors: Vec<S>) -> S {
 }
 
 pub(crate) fn pow(base: S, e: S) -> S {
+    if !work::spend(1) {
+        return ZERO;
+    }
     if let Some(k) = num_of(&e) {
         if k.is_zero() {
             return ONE;
@@ -514,6 +537,9 @@ fn sym(name: &str) -> S {
 }
 
 pub(crate) fn func(name: &str, args: Vec<S>) -> S {
+    if !work::spend(1 + args.len()) {
+        return ZERO;
+    }
     let one = args.len() == 1;
     let a = args.first();
     let zero = a.is_some_and(|x| *x == ZERO);
@@ -637,11 +663,13 @@ pub(crate) struct Ctx<'a> {
     /// Parameters bound while a function body is expanded.
     bound: HashMap<String, S>,
     depth: usize,
+    /// Calls of [`from_expr`] in progress.
+    nesting: usize,
 }
 
 impl<'a> Ctx<'a> {
     pub(crate) fn new(functions: Functions<'a>) -> Self {
-        Ctx { functions, bound: HashMap::new(), depth: 0 }
+        Ctx { functions, bound: HashMap::new(), depth: 0, nesting: 0 }
     }
 }
 
@@ -660,6 +688,18 @@ fn var_name(e: &Expr, what: &str) -> Res<String> {
 }
 
 pub(crate) fn from_expr(e: &Expr, cx: &mut Ctx) -> Res<S> {
+    // the document's functions expand into each other, so this can go deeper than the
+    // expression as parsed
+    if cx.nesting >= work::MAX_NESTING {
+        return Err(work::TOO_DEEP.into());
+    }
+    cx.nesting += 1;
+    let r = build(e, cx);
+    cx.nesting -= 1;
+    r
+}
+
+fn build(e: &Expr, cx: &mut Ctx) -> Res<S> {
     Ok(match e {
         Expr::Num(t) => parse_num(t),
         Expr::Ident(name) => match cx.bound.get(name) {
@@ -721,7 +761,11 @@ fn series_call(name: &str, args: &[Expr], cx: &mut Ctx) -> Res<Vec<S>> {
 
 /// An expression as the user would type it, for messages.
 fn show(e: &S) -> String {
-    print(&to_expr(&tidy(e)))
+    let e = tidy(e);
+    if work::shown_depth(&e) > work::MAX_SHOWN_DEPTH {
+        return "this expression".into();
+    }
+    print(&to_expr(&e))
 }
 
 fn call(name: &str, args: &[Expr], cx: &mut Ctx) -> Res<S> {
@@ -738,6 +782,9 @@ fn call(name: &str, args: &[Expr], cx: &mut Ctx) -> Res<S> {
             };
             let mut f = arg(0, cx)?;
             for _ in 0..times {
+                if work::exhausted() {
+                    break;
+                }
                 f = diff(&f, &x);
             }
             Ok(f)
@@ -804,7 +851,10 @@ fn call(name: &str, args: &[Expr], cx: &mut Ctx) -> Res<S> {
                 let out = from_expr(&body, cx);
                 cx.depth -= 1;
                 cx.bound = saved;
-                return out;
+                // a body with the arguments put in is as deep as both together
+                let out = out?;
+                work::check_depth(&out)?;
+                return Ok(out);
             }
             let xs: Vec<S> = args.iter().map(|a| from_expr(a, cx)).collect::<Res<_>>()?;
             Ok(func(name, xs))
@@ -830,7 +880,7 @@ pub(crate) fn subs(e: &S, x: &str, v: &S) -> S {
 }
 
 pub(crate) fn diff(e: &S, x: &str) -> S {
-    if !e.depends(x) {
+    if !work::spend(1) || !e.depends(x) {
         return ZERO;
     }
     match e {
@@ -1050,6 +1100,10 @@ fn print(e: &Expr) -> String {
 
 /// `expr →`: the expression worked out symbolically, as linear text.
 pub(crate) fn evaluate(e: &Expr, functions: Functions) -> Res<String> {
+    work::budgeted(|| evaluate_within(e, functions))
+}
+
+fn evaluate_within(e: &Expr, functions: Functions) -> Res<String> {
     let mut cx = Ctx::new(functions);
     // a series reads from the lowest power up, so it is written out term by term
     if let Expr::Call(f, args) = e
@@ -1057,15 +1111,24 @@ pub(crate) fn evaluate(e: &Expr, functions: Functions) -> Res<String> {
         && args.len() == 4
     {
         let terms: Vec<S> = series_call(f, args, &mut cx)?.iter().map(tidy).collect();
+        let deepest = terms.iter().map(work::shown_depth).max().unwrap_or(0);
+        if work::exhausted() || terms.len() + deepest > work::MAX_SHOWN_DEPTH {
+            return Err(work::TOO_MUCH_WORK.into());
+        }
         return Ok(print(&sum_expr(&terms)));
     }
     let s = from_expr(e, &mut cx)?;
+    work::check_depth(&s)?;
     // expand() and factor() ask for a form; anything else is simplified and shown
     // factored where it can be
     let shown = match e {
         Expr::Call(f, _) if f == "expand" || f == "factor" => s,
         _ => tidy(&simplify(&s)),
     };
+    // what ran out of work collapsed to 0: the result must not be shown
+    if work::exhausted() || work::shown_depth(&shown) > work::MAX_SHOWN_DEPTH {
+        return Err(work::TOO_MUCH_WORK.into());
+    }
     Ok(print(&to_expr(&shown)))
 }
 
