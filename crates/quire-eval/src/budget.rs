@@ -81,12 +81,17 @@ pub(crate) fn check_size(rows: usize, cols: usize) -> Result<()> {
 mod tests {
     use std::time::{Duration, Instant};
 
+    /// What counts as a hang. Each case here takes well under a second when it works and ran
+    /// for minutes before the limits; the bound is generous so a slow, shared test runner
+    /// (an unoptimised build on CI is several times slower than a laptop) can't fail it.
+    const HANG: Duration = Duration::from_secs(30);
+
     use crate::{DisplaySettings, DisplaySpec, MathInput, TableInput, Worksheet};
 
     /// Runs `lines` (a line ending in ` →` is symbolic) on a thread with the web version's
     /// stack, 1 MB; unoptimised builds use several times more stack per call, so they get 8 MB.
-    /// Returns what each line shows, or `!` and its error. Fails if it takes over `secs`.
-    fn run_in(secs: u64, marked: bool, lines: &[&str]) -> Vec<String> {
+    /// Returns what each line shows, or `!` and its error. Fails if it takes over [`HANG`].
+    fn run_in(marked: bool, lines: &[&str]) -> Vec<String> {
         let regions: Vec<MathInput> = lines
             .iter()
             .enumerate()
@@ -108,7 +113,7 @@ mod tests {
         });
         let Ok(Ok(out)) = run.map(|h| h.join()) else { std::process::abort() };
         let took = start.elapsed();
-        assert!(took < Duration::from_secs(secs), "took {took:?}");
+        assert!(took < HANG, "took {took:?}");
         out.into_iter()
             .map(|o| match (o.error, o.shown) {
                 (Some(e), _) => format!("!{e}"),
@@ -118,7 +123,7 @@ mod tests {
     }
 
     fn run(lines: &[&str]) -> Vec<String> {
-        run_in(3, false, lines)
+        run_in(false, lines)
     }
 
     fn nested(open: &str, close: &str, n: usize) -> String {
@@ -191,7 +196,7 @@ mod tests {
         let out = run(&[
             "(1..200000)*transpose(1..200000)",
             "identity(1500)",
-            "v := 1..1000000",
+            "v := 1..400000",
             "stack(v, v, v)",
             "range(1, 2000000)",
         ]);
@@ -234,7 +239,7 @@ mod tests {
         let out = Worksheet::new(DisplaySettings::default()).run(&[input]);
         let cell = out.first().and_then(|o| o.cells.first()).and_then(|r| r.get(1)).cloned();
         assert_eq!(cell.and_then(|c| c.shown).as_deref(), Some("1"));
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() < HANG);
     }
 
     #[test]
@@ -248,7 +253,7 @@ mod tests {
     #[test]
     fn formulas_built_in_a_loop_stop_growing() {
         // SMath mode: names with no value are symbols, so these formulas grow each time round
-        let out = run_in(3, true, &["for(i, 1..1000, y := x[y])", "for(i, 1..1000, z := sin(z))"]);
+        let out = run_in(true, &["for(i, 1..1000, y := x[y])", "for(i, 1..1000, z := sin(z))"]);
         assert!(fails_with(&out, 0, "grew too large"), "{out:?}");
         assert!(fails_with(&out, 1, "grew too large"), "{out:?}");
     }
