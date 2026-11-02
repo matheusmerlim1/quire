@@ -57,6 +57,9 @@ test("copies math, text and tables for other apps", async ({ page }) => {
   await blank(page);
   await typeLines(page, "q:=12 kN/m", "M:=q*2 m=", "The span is simply supported.");
   await expect(regions(page).nth(1)).toContainText(/=24\s*kN$/);
+  // the text as the engine rendered it: the results are those of the document as typed,
+  // so the copy carries them (until then it carries the math as typed, without results)
+  await expect(regions(page).nth(2).locator("p")).toHaveText("The span is simply supported.");
   await page.keyboard.press("ControlOrMeta+a");
   const data = await copied(page);
   expect(data["text/plain"]).toBe("q:=12 kN/m\nM:=q*2 m =\nThe span is simply supported.");
@@ -66,6 +69,26 @@ test("copies math, text and tables for other apps", async ({ page }) => {
   expect(html).toContain("<mn>24</mn>");
   expect(html).not.toContain("data-v=");
   expect(JSON.parse(data["application/x-quire-regions"]).regions).toHaveLength(3);
+});
+
+test("a copy right after typing has what was typed, before the results catch up", async ({ page }) => {
+  await blank(page);
+  await typeLines(page, "q:=12 kN/m", "The span");
+  await expect(regions(page).nth(1).locator("p")).toHaveText("The span");
+  // the engine is slow to answer (a busy machine): the results on screen fall behind
+  const held: (() => void)[] = [];
+  await page.route("**/api/report", (route) => void held.push(() => void route.continue().catch(() => {})));
+  // Enter edits the selected text again, the caret at its end
+  await page.keyboard.press("Enter");
+  await page.keyboard.type(" is simply supported.");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("ControlOrMeta+a");
+  const data = await copied(page);
+  expect(data["text/plain"]).toBe("q:=12 kN/m\nThe span is simply supported.");
+  expect(data["text/html"]).toContain("<p>The span is simply supported.</p>");
+  expect(data["text/html"]).toContain("q:=12 kN/m");
+  expect(JSON.parse(data["application/x-quire-regions"]).regions[1].text).toBe("The span is simply supported.");
+  for (const release of held) release();
 });
 
 test("pastes regions with their images from another document", async ({ page }) => {
@@ -187,6 +210,30 @@ test("copies a plot as an image under the desktop app's content security policy"
   await page.getByRole("menuitem", { name: "Copy as Image" }).click();
   await expect(page.locator(".toast")).toContainText("Copied the plot as an image");
   // ‰PNG
+  expect(await page.evaluate(() => (window as unknown as { copied?: number[] }).copied)).toEqual([
+    0x89, 0x50, 0x4e, 0x47,
+  ]);
+});
+
+test("copies a 3D plot as an image under the desktop app's content security policy", async ({ page }) => {
+  await withAppCsp(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.clipboard, "write", {
+      value: async (items: ClipboardItem[]) => {
+        const png = await items[0].getType("image/png");
+        (window as unknown as { copied: number[] }).copied = [...new Uint8Array(await png.slice(0, 4).arrayBuffer())];
+      },
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Blank document/ }).click();
+  await page.getByRole("button", { name: "Insert" }).click();
+  await page.getByRole("menuitem", { name: "3D Plot" }).click();
+  const plot = page.locator(".region.plot3d");
+  await expect(plot.getByRole("img", { name: "3D plot of sin(x)*cos(y)" })).toBeVisible();
+  await plot.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy as Image" }).click();
+  await expect(page.locator(".toast")).toContainText("Copied the plot as an image");
   expect(await page.evaluate(() => (window as unknown as { copied?: number[] }).copied)).toEqual([
     0x89, 0x50, 0x4e, 0x47,
   ]);

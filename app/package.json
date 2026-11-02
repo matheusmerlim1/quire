@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "wasm": "cargo build -q -p quire-web --target wasm32-unknown-unknown --profile web && node -e \"const fs = require('fs'); fs.mkdirSync('web-public', { recursive: true }); fs.copyFileSync('../target/wasm32-unknown-unknown/web/quire_web.wasm', 'web-public/quire_web.wasm')\"",
+    "wasm": "cargo build -q --locked -p quire-web --target wasm32-unknown-unknown --profile web && node -e \"const fs = require('fs'); fs.mkdirSync('web-public', { recursive: true }); fs.copyFileSync('../target/wasm32-unknown-unknown/web/quire_web.wasm', 'web-public/quire_web.wasm')\"",
     "dev:web": "npm run wasm && vite --mode web",
     "build:web": "npm run wasm && tsc --noEmit && vite build --mode web",
     "api": "cargo run -q -p quire-cli -- serve",
@@ -21,17 +21,17 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-dialog": "^2.8.3",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
     "@tauri-apps/plugin-process": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.14.1",
     "prosemirror-commands": "^1.7.2",
     "prosemirror-history": "^1.5.1",
     "prosemirror-keymap": "^1.2.3",
     "prosemirror-model": "^1.25.12",
-    "prosemirror-schema-list": "^1.5.1",
+    "prosemirror-schema-list": "^1.6.0",
     "prosemirror-state": "^1.4.4",
     "prosemirror-view": "^1.42.8",
-    "solid-js": "^1.9.17"
+    "solid-js": "^1.9.18"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
@@ -41,7 +41,7 @@
     "prettier": "3.9.10",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
-    "vite-plugin-solid": "^2.11.14",
+    "vite-plugin-solid": "^2.11.15",
     "vitest": "^5.0.5"
   }
 }

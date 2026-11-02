@@ -137,6 +137,32 @@ mod tests {
         Ok(())
     }
 
+    /// What a shared link can hold at the limits: the report (parsing, evaluating, `→`, and
+    /// the parsed trees sent back as JSON) fits WebAssembly's 1 MB stack, with room to spare in
+    /// an optimised build (unoptimised builds need several times more, so they get 8 MB).
+    #[test]
+    fn a_document_at_the_engine_limits_reports_on_a_small_stack() {
+        let size = if cfg!(debug_assertions) { 8 << 20 } else { 1 << 20 };
+        let run = std::thread::Builder::new().stack_size(size).spawn(|| -> Result<String, String> {
+            let n = 199;
+            let parens = format!("{}x{}", "(".repeat(n), ")".repeat(n));
+            let calls = format!("{}x{}", "abs(".repeat(n), ")".repeat(n));
+            let mut doc = dispatch("new_document", &json!({}))?;
+            doc["regions"] = json!([
+                { "id": "a", "kind": "math", "at": [0, 0], "expr": "x:=2" },
+                { "id": "b", "kind": "math", "at": [0, 30], "expr": parens, "show": "value" },
+                { "id": "c", "kind": "math", "at": [0, 60], "expr": calls, "show": "symbolic" },
+                { "id": "d", "kind": "math", "at": [0, 90], "expr": "g(n):=if(n<1, 0, 1 + g(n-1))" },
+                { "id": "e", "kind": "math", "at": [0, 120], "expr": "g(250)", "show": "value" },
+                { "id": "f", "kind": "math", "at": [0, 150], "expr": "(".repeat(5000), "show": "value" },
+            ]);
+            Ok(dispatch("report", &json!({ "doc": doc }))?.to_string())
+        });
+        let Ok(Ok(Ok(report))) = run.map(|h| h.join()) else { std::process::abort() };
+        assert!(report.contains("\"resultText\":\"250\""), "{report:.300}");
+        assert!(report.contains("too deeply nested"), "{report:.300}");
+    }
+
     #[test]
     fn a_document_survives_the_trip_through_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let doc = dispatch("open_template", &json!({ "id": "builtin:beam" }))?["doc"].clone();

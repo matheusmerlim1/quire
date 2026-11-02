@@ -1,5 +1,4 @@
 use std::fmt;
-use std::ops::{Add, Div, Mul, Sub};
 
 use crate::Rational;
 
@@ -21,8 +20,23 @@ impl Dim {
         self.0.iter().all(|r| r.is_zero())
     }
 
-    pub fn pow(self, r: Rational) -> Dim {
-        Dim(self.0.map(|e| e * r))
+    /// Each exponent times `r`; `None` when one no longer fits (see [`Rational`]).
+    pub fn pow(self, r: Rational) -> Option<Dim> {
+        let mut out = self.0;
+        for e in &mut out {
+            *e = e.checked_mul(r)?;
+        }
+        Some(Dim(out))
+    }
+
+    /// The dimension of a product; `None` when an exponent no longer fits.
+    pub fn checked_mul(self, o: Dim) -> Option<Dim> {
+        zip_with(self, o, Rational::checked_add)
+    }
+
+    /// The dimension of a quotient; `None` when an exponent no longer fits.
+    pub fn checked_div(self, o: Dim) -> Option<Dim> {
+        zip_with(self, o, Rational::checked_sub)
     }
 
     /// `(base unit, exponent)` for each non-zero exponent.
@@ -32,26 +46,12 @@ impl Dim {
 }
 
 /// Combines the exponents of two dimensions component by component.
-fn zip_with(a: Dim, b: Dim, f: fn(Rational, Rational) -> Rational) -> Dim {
+fn zip_with(a: Dim, b: Dim, f: fn(Rational, Rational) -> Option<Rational>) -> Option<Dim> {
     let mut out = a.0;
     for (x, y) in out.iter_mut().zip(b.0) {
-        *x = f(*x, y);
+        *x = f(*x, y)?;
     }
-    Dim(out)
-}
-
-impl Mul for Dim {
-    type Output = Dim;
-    fn mul(self, o: Dim) -> Dim {
-        zip_with(self, o, Add::add)
-    }
-}
-
-impl Div for Dim {
-    type Output = Dim;
-    fn div(self, o: Dim) -> Dim {
-        zip_with(self, o, Sub::sub)
-    }
+    Some(Dim(out))
 }
 
 impl fmt::Display for Dim {
@@ -104,7 +104,8 @@ mod tests {
         assert_eq!(Dim::from_ints([1, 1, -2, 0, 0, 0, 0]).to_string(), "m*kg/s^2");
         assert_eq!(Dim::from_ints([0, 0, -1, 0, 0, 0, 0]).to_string(), "1/s");
         assert_eq!(Dim::from_ints([1, 0, -2, -1, 0, 0, 0]).to_string(), "m/(s^2*A)");
-        assert_eq!(Dim::from_ints([2, 0, 0, 0, 0, 0, 0]).pow(Rational::new(1, 4)).to_string(), "m^(1/2)");
+        let quarter = Rational::new(1, 4).and_then(|r| Dim::from_ints([2, 0, 0, 0, 0, 0, 0]).pow(r));
+        assert_eq!(quarter.map(|d| d.to_string()).as_deref(), Some("m^(1/2)"));
         assert_eq!(Dim::NONE.to_string(), "1 (dimensionless)");
     }
 }

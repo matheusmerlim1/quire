@@ -763,17 +763,25 @@ fn plain_djot(src: &str) -> String {
 // One entry point for the app and the dev server
 // ---------------------------------------------------------------------------
 
+/// The folder operation `op` works in: the notebook's root, or the folder `create_notebook`
+/// makes. Every other path an operation takes is relative and stays inside it (`inside`), so the
+/// desktop app checks only this one against the folders the user chose.
+pub fn folder(op: &str, args: &Json) -> Result<PathBuf> {
+    let key = if op == "create_notebook" { "path" } else { "root" };
+    args.get(key).and_then(Json::as_str).map(PathBuf::from).ok_or_else(|| err(format!("missing \"{key}\"")))
+}
+
 /// Run notebook operation `op` with JSON arguments, as the desktop app and `quire serve`
 /// receive them: `{"root": "/…/Physics 101", "rel": "Mechanics/Kinematics.quire", …}`.
 pub fn call(op: &str, args: &Json) -> Result<Json> {
     let s = |k: &str| args.get(k).and_then(Json::as_str).ok_or_else(|| err(format!("missing \"{k}\"")));
     let opt_s = |k: &str| args.get(k).and_then(Json::as_str).map(str::to_string);
     let index = args.get("index").and_then(Json::as_u64).map(|i| i as usize);
-    let root = || s("root").map(PathBuf::from);
+    let root = || folder(op, args);
     let text = |v: String| Ok(Json::String(v));
     match op {
         "list" => Ok(serde_json::to_value(list(&root()?)?)?),
-        "create_notebook" => text(create_notebook(Path::new(s("path")?), s("ext")?)?),
+        "create_notebook" => text(create_notebook(&root()?, s("ext")?)?),
         "create_note" => text(create_note(
             &root()?,
             s("dir")?,
@@ -1020,6 +1028,39 @@ mod tests {
         assert_eq!(book["children"][0]["kind"], "section");
         assert!(call("rename", &serde_json::json!({ "root": root, "rel": "Labs" })).is_err(), "missing name");
         assert!(call("explode", &serde_json::json!({})).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_operation_changes_only_the_folder_it_names() -> TestResult {
+        let b = Book::new("folder")?;
+        let (made, elsewhere) = (b.0.join("Made"), b.0.join("Elsewhere"));
+        std::fs::create_dir(&elsewhere)?;
+        // a root beside the path must not decide where a notebook is made
+        let args = serde_json::json!({ "path": made, "root": elsewhere, "ext": "quire" });
+        assert_eq!(folder("create_notebook", &args)?, made);
+        call("create_notebook", &args)?;
+        assert!(made.join("Untitled.quire").exists());
+        assert_eq!(std::fs::read_dir(&elsewhere)?.count(), 0);
+        for op in ["list", "create_note", "create_section", "rename", "move", "duplicate", "trash", "search"]
+        {
+            assert_eq!(folder(op, &args)?, elsewhere, "{op} works in its root");
+        }
+        assert!(folder("list", &serde_json::json!({ "path": made })).is_err(), "no root, no folder");
+        // relative paths stay inside the root, so the root is all there is to check
+        let made_s = made.to_string_lossy();
+        for (op, extra) in [
+            ("create_note", serde_json::json!({ "dir": "..", "ext": "quire" })),
+            ("create_section", serde_json::json!({ "dir": "../Elsewhere", "name": "x" })),
+            ("rename", serde_json::json!({ "rel": "../Elsewhere", "name": "x" })),
+            ("move", serde_json::json!({ "rel": "Untitled.quire", "to": ".." })),
+            ("trash", serde_json::json!({ "rel": "../Elsewhere" })),
+        ] {
+            let mut args = extra;
+            args["root"] = made_s.as_ref().into();
+            assert!(call(op, &args).is_err(), "{op} must not leave the notebook");
+        }
+        assert!(elsewhere.is_dir() && made.join("Untitled.quire").exists());
         Ok(())
     }
 

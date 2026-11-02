@@ -10,5 +10,5 @@ mod parser;
 mod printer;
 
 pub use ast::{BinaryOp, CmpOp, Expr, UnaryOp};
-pub use parser::{ParseError, parse};
+pub use parser::{MAX_DEPTH, ParseError, parse};
 pub use printer::{print, quote_str};

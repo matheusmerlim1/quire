@@ -191,7 +191,7 @@ In a **marked** document (`"settings": {"units": {"marked": true}}`, which the S
 
 The report tells the editor how each name was resolved, and which variables hide a constant. The editor colours units blue and constants purple, explains a name on hover, and offers a one-click "use the unit" fix while you type.
 
-Canonical function names are English (`tan`, `sinh`, `atan`, `log10`). The importer maps SMath's `tg`, `sh`, `arctg`, `nthroot` and so on.
+Canonical function names are English (`tan`, `sinh`, `atan`, `log10`). The importer maps SMath's `tg`, `sh`, `arctg`, `arsh`, `arcth`, `cosech`, `nthroot` and so on.
 
 ### 4.4 `text` (Djot)
 

@@ -1,0 +1,29 @@
+# Workflows pin every third-party action by commit; Dependabot proposes the new commit (and
+# the version comment) when an action releases. Once a month, at most one pull request per
+# ecosystem: every update is grouped, major versions included, so crates that must move
+# together (sha1 and sha2 share the digest traits) arrive in the same pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: monthly
+    groups:
+      npm:
+        patterns: ["*"]

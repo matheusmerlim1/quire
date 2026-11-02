@@ -6,6 +6,7 @@
 use quire_ast::{Expr, parse};
 use quire_units::{Dim, UnitRegistry};
 
+use crate::budget::MAX_ELEMENTS;
 use crate::error::{Result, bail};
 use crate::interp::{Interp, Scope};
 use crate::plot::in_unit;
@@ -15,6 +16,9 @@ use crate::value::{Quantity, Value};
 pub const GRID: usize = 40;
 /// Steps along a curve (241 points, as a 2D plot).
 pub const CURVE: usize = crate::plot::SAMPLES;
+
+// the sampled grids are well inside the engine's element cap
+const _: () = assert!((GRID + 1) * (GRID + 1) <= MAX_ELEMENTS && CURVE < MAX_ELEMENTS);
 
 #[derive(Debug, Clone, Default)]
 pub struct Series3Input {
@@ -156,11 +160,22 @@ fn one_dim(mut values: Vec<Quantity>, what: &str) -> Result<Vec<Quantity>> {
     Ok(values)
 }
 
-/// A value's numbers row by row, with its rows and columns.
-fn numbers(v: Value, what: &str) -> Result<(Vec<Quantity>, usize, usize)> {
-    match v {
+/// The numbers `e` evaluates to, row by row, with its rows and columns. Each number is a step
+/// of the evaluation's budget, and there are at most [`MAX_ELEMENTS`] of them.
+fn numbers(
+    interp: &mut Interp,
+    scope: &mut Scope,
+    e: &Expr,
+    what: &str,
+) -> Result<(Vec<Quantity>, usize, usize)> {
+    match interp.eval(scope, e)? {
         Value::Num(q) => Ok((vec![q], 1, 1)),
         Value::Matrix(m) => {
+            let n = m.data.len();
+            if n > MAX_ELEMENTS {
+                bail!("{what}: {n} points are too many to plot (at most {MAX_ELEMENTS})");
+            }
+            interp.tick_n(n as u64)?;
             let qs = m.data.iter().map(|v| v.as_num(what)).collect::<Result<Vec<_>>>()?;
             Ok((qs, m.rows, m.cols))
         }
@@ -199,9 +214,9 @@ pub(crate) fn sample(s: &Series3Input, interp: &mut Interp, scope: &mut Scope) -
             return Ok(Raw { shape, cols, xs, ys, zs });
         }
         // data: three vectors of points
-        let (xs, ..) = numbers(interp.eval(scope, &xe)?, "the x values")?;
-        let (ys, ..) = numbers(interp.eval(scope, &ye)?, "the y values")?;
-        let (zs, ..) = numbers(interp.eval(scope, &ze)?, "the z values")?;
+        let (xs, ..) = numbers(interp, scope, &xe, "the x values")?;
+        let (ys, ..) = numbers(interp, scope, &ye, "the y values")?;
+        let (zs, ..) = numbers(interp, scope, &ze, "the z values")?;
         if xs.len() != zs.len() || ys.len() != zs.len() {
             bail!("{} x, {} y and {} z values: they should match", xs.len(), ys.len(), zs.len());
         }
@@ -229,7 +244,7 @@ pub(crate) fn sample(s: &Series3Input, interp: &mut Interp, scope: &mut Scope) -
         return Ok(Raw { shape: Shape::Surface, cols, xs, ys, zs });
     }
     // SMath: a matrix is a surface over its column (x) and row (y) numbers
-    let (zs, rows, cols) = numbers(interp.eval(scope, &z)?, "the plotted values")?;
+    let (zs, rows, cols) = numbers(interp, scope, &z, "the plotted values")?;
     if rows < 2 || cols < 2 {
         bail!("plot a surface with x and y ranges, or a matrix of heights with two or more rows and columns");
     }
@@ -407,6 +422,21 @@ mod tests {
                 "series 2: plot a surface with x and y ranges, or a matrix of heights with two or more rows and columns"
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sampling_stops_at_the_step_budget() -> TestResult {
+        // every point loops 20 000 times: 41 × 41 points of it is past the budget
+        let slow = Series3Input {
+            xrange: Some("0..1".into()),
+            yrange: Some("0..1".into()),
+            ..surface("for(i, 1..20000, i) + x")
+        };
+        let out = run(&[plot3("p", vec![slow], Default::default())]);
+        let p = outcome(&out[0])?;
+        let e = p.series[0].error.as_deref().unwrap_or_default();
+        assert!(e.contains("stopped after"), "{e}");
         Ok(())
     }
 
